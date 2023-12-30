@@ -4,6 +4,8 @@
 
 `llmware` is a unified framework for developing LLM-based application patterns including Retrieval Augmented Generation (RAG). This project provides an integrated set of tools that anyone can use – from beginner to the most sophisticated AI developer – to rapidly build industrial-grade, knowledge-based enterprise LLM applications with specific focus on making it easy to integrate open source small specialized models and connecting enterprise knowledge safely and securely to LLMs in private cloud. 
 
+[Find us on Discord](https://discord.gg/MhZn5Nc39h)
+
 ## 🎯  Key features
 `llmware` is an integrated framework comprised of four major components:
 
