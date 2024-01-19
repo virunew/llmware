@@ -1538,7 +1538,8 @@ class Parser:
         coords_dict = {"coords_x": 0, "coords_y": 0, "coords_cx": 0, "coords_cy": 0}
 
         counter = 0
-
+        if not isinstance(output, list):
+            output = [output]
         for entries in output:
 
             if content_type == "text":
@@ -3430,7 +3431,7 @@ class ImageParser:
         except PDFInfoNotInstalledError as e:
             raise OCRDependenciesNotFoundException("poppler")
         for j, image in enumerate(images):
-
+            logging.debug(f"converting {j}th image to text" )
             # run ocr over page image
             try:
                 text = pytesseract.image_to_string(image)
@@ -3440,7 +3441,7 @@ class ImageParser:
             text_chunks = TextChunker(text_chunk=text,
                                       max_char_size=self.text_chunk_size,
                                       look_back_char_range=self.look_back_range).convert_text_to_chunks()
-
+            logging.debug(f"text chunks:{str(text_chunks)}")
             text_output_by_page.append(text_chunks)
 
         return text_output_by_page

@@ -2533,7 +2533,7 @@ class CohereEmbeddingModel:
         toks = tokenizer.encode(text_sample).ids
         return len(toks)
 
-    def embedding(self,text_sample):
+    def embedding(self,text_sample,input_type='search_query'):
 
         if not self.api_key:
             self.api_key = self._get_api_key()
