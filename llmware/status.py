@@ -135,10 +135,10 @@ class Status:
         while True:
             status_dict = self.get_embedding_status(library_name, model_name)
             if status_dict:
-                if current_summary != status_dict["summary"]:  # If the status has changed, print it
-                    current_summary = status_dict["summary"]
+                if current_summary != status_dict[0]["summary"]:  # If the status has changed, print it
+                    current_summary = status_dict[0]["summary"]
                     print(current_summary)
-                    if status_dict["current"] >= status_dict["total"]:  # If the job is done exit
+                    if status_dict[0]["current"] >= status_dict[0]["total"]:  # If the job is done exit
                         return     
             time.sleep(poll_seconds)
 
