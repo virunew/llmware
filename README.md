@@ -4,15 +4,19 @@
 [![discord](https://img.shields.io/badge/Chat%20on-Discord-blue?logo=discord&logoColor=white)](https://discord.gg/MhZn5Nc39h)   
 [![Documentation](https://github.com/llmware-ai/llmware/actions/workflows/pages.yml/badge.svg)](https://github.com/llmware-ai/llmware/actions/workflows/pages.yml)
 
-## 🧰🛠️🔩The Ultimate Toolkit for Building LLM Apps
+## 🧰🛠️🔩Building Enterprise RAG Pipelines with Small, Specialized Models  
 
-From quickly building POCs to scalable LLM Apps for the enterprise, LLMWare is packed with all the tools you need. 
+`llmware` provides a unified framework for building LLM-based applications (e.g, RAG, Agents), using small, specialized models that can be deployed privately, integrated with enterprise knowledge sources safely and securely, and cost-effectively tuned and adapted for any business process.  
 
-`llmware` is an integrated framework with over 50+ models for quickly developing LLM-based applications including Retrieval Augmented Generation (RAG) and Multi-Step Orchestration of Agent Workflows.  
+ `llmware` has two main components:  
+ 
+ 1.  **RAG Pipeline** - integrated components for the full lifecycle of connecting knowledge sources to generative AI models; and 
 
-This project provides a comprehensive set of tools that anyone can use - from a beginner to the most sophisticated AI developer - to rapidly build industrial-grade, knowledge-based enterprise LLM applications. 
+ 2.  **50+ small, specialized models** fine-tuned for key tasks in enterprise process automation, including fact-based question-answering, classification, summarization, and extraction.  
 
-Our specific focus is on making it easy to integrate open source small specialized models and connecting enterprise knowledge safely and securely. 
+By bringing together both of these components, along with integrating leading open source models and underlying technologies, `llmware` offers a comprehensive set of tools to rapidly build knowledge-based enterprise LLM applications.  
+
+Most of our examples can be run without a GPU server - get started right away on your laptop.   
 
 [Join us on Discord](https://discord.gg/MhZn5Nc39h)   |  [Watch Youtube Tutorials](https://www.youtube.com/@llmware)  | [Explore our Model Families on Huggingface](https://www.huggingface.co/llmware)   
 
@@ -37,7 +41,7 @@ Writing code with`llmware` is based on a few main concepts:
 
 
 ```python
-#   50+ Models in Catalog with 20+ RAG-optimized BLING, DRAGON and Industry BERT models
+#   150+ Models in Catalog with 50+ RAG-optimized BLING, DRAGON and Industry BERT models
 #   Full support for GGUF, HuggingFace, Sentence Transformers and major API-based models
 #   Easy to extend to add custom models - see examples
 
@@ -601,7 +605,7 @@ if __name__ == "__main__":
 
 -**Voice Transcription with WhisperCPP** - [getting_started](examples/Models/using-whisper-cpp-getting-started.py), [using_sample_files](examples/Models/using-whisper-cpp-sample-files.py), and [analysis_use_case](examples/Use_Cases/parsing_great_speeches.py) with [great_speeches_video](https://youtu.be/5y0ez5ZBpPE?si=KVxsXXtX5TzvlEws)    
 
--**Phi-3 GGUF Streaming Local Chatbot with UI** - setup your own Phi-3-gguf chatbot on your laptop in minutes - [example](examples/UI/gguf_streaming_chatbot.py)  
+-**Phi-3 GGUF Streaming Local Chatbot with UI** - setup your own Phi-3-gguf chatbot on your laptop in minutes - [example](examples/UI/gguf_streaming_chatbot.py)  with [video](https://youtu.be/gzzEVK8p3VM?si=8cNn_do0oxSzCEnM)  
 
 -**Small, specialized, function-calling Extract Model** - introducing slim-extract - [video](https://youtu.be/d6HFfyDk4YE?si=VB8JTsN3X7hsB_I) and [example](examples/SLIM-Agents/using_slim_extract_model.py)  
 
@@ -611,9 +615,9 @@ if __name__ == "__main__":
 
 -**Multi-Model Agents with SLIM models** - multi-step Agents with SLIMs on CPU - [video](https://www.youtube.com/watch?v=cQfdaTcmBpY) - [example](examples/SLIM-Agents)  
 
--**OCR Embedded Document Images Example** - systematically extract text from images embeddedd in documents ([example](examples/Parsing/ocr_embedded_doc_images.py))  
+-**OCR Embedded Document Images Example** - systematically extract text from images embedded in documents [example](examples/Parsing/ocr_embedded_doc_images.py)   
 
--**Enhanced Parser Functions for PDF, Word, Powerpoint and Excel** - new text-chunking controls and strategies, extract tables, images, header text - ([example](examples/Parsing/pdf_parser_new_configs.py))   
+-**Enhanced Parser Functions for PDF, Word, Powerpoint and Excel** - new text-chunking controls and strategies, extract tables, images, header text - [example](examples/Parsing/pdf_parser_new_configs.py)   
 
 -**Agent Inference Server** - set up multi-model Agents over Inference Server [example](https://github.com/llmware-ai/llmware/tree/main/examples/SLIM-Agents/agent_api_endpoint.py)  
 
@@ -623,7 +627,9 @@ if __name__ == "__main__":
 
 ## 🌱 Getting Started
 
-**Step 1 - Install llmware** -  `pip3 install llmware `
+**Step 1 - Install llmware** -  `pip3 install llmware` or `pip3 install 'llmware[full]'`  
+
+- note: starting with v0.3.0, we provide options for a [core install](https://github.com/llmware-ai/llmware/blob/main/llmware/requirements.txt) (minimal set of dependencies) or [full install](https://github.com/llmware-ai/llmware/blob/main/llmware/requirements_extras.txt) (adds to the core with wider set of related python libraries).  
 
 <details>
 <summary><b>Step 2- Go to Examples</b> - Get Started Fast with 100+ 'Cut-and-Paste' Recipes </summary>
@@ -660,6 +666,8 @@ Check out:  [llmware examples](https://github.com/llmware-ai/llmware/blob/main/e
 <summary><b>Step 3 - Tutorial Videos</b> - check out our Youtube channel for high-impact 5-10 minute tutorials on the latest examples.   </summary>
 
 🎬 Check out these videos to get started quickly:  
+- [Document Summarization](https://youtu.be/Ps3W-P9A1m8?si=Rxvst3RJv8ZaOk0L)  
+- [Bling-3-GGUF Local Chatbot](https://youtu.be/gzzEVK8p3VM?si=8cNn_do0oxSzCEnM)  
 - [Agent-based Complex Research Analysis](https://youtu.be/y4WvwHqRR60?si=jX3KCrKcYkM95boe)  
 - [Getting Started with SLIMs (with code)](https://youtu.be/aWZFrTDmMPc?si=lmo98_quo_2Hrq0C)  
 - [Are you prompting wrong for RAG - Stochastic Sampling-Part I](https://youtu.be/7oMTGhSKuNY?si=_KSjuBnqArvWzYbx)  
@@ -756,17 +764,28 @@ If you would like to use a proprietary model, you will need to provide your own 
 
 ## ✍️ Working with the llmware Github repository
 
-The llmware repo can be pulled locally to get access to all the examples, or to work directly with the latest version of the llmware code.
+The llmware repo can be pulled locally to get access to all the examples, or to work directly with the latest version of the llmware code.  
 
 ```bash
 git clone git@github.com:llmware-ai/llmware.git
-```
+```  
 
-After cloning the repo, depending upon your IDE enviroment, you may need to take these additional steps:  
-1.  **install requirements.txt** - inside the /llmware path - e.g., ```pip3 install -r llmware/requirements.txt```   (If you copy the requirements.txt file into the root of the project folder, then many IDEs will auto install the requirements and/or you can then run the canonical `pip3 install -r requirements.txt`)   
-2.  **run examples** - copy the example .py file into the root project path.   (We have seen several IDEs that will attempt to run interactively from the nested /example path, and then not have access to the /llmware module.  We will look into fixing this with a small automation script, but for now, the easy fix is to just copy the example you want to run into the root path).  
-3.  **install vector db** - to use a vector db, you will need to separately install the python library for that vector db, e.g., `pip3 install pymilvus`, or `pip3 install chromadb`.   
-   
+We have provided a **welcome_to_llmware** automation script in the root of the repository folder.  After cloning:  
+- On Windows command line:  `.\welcome_to_llmware_windows.sh`  
+- On Mac / Linux command line:  `sh ./welcome_to_llmware.sh`  
+
+Alternatively, if you prefer to complete setup without the welcome automation script, then the next steps include:  
+
+1.  **install requirements.txt** - inside the /llmware path - e.g., ```pip3 install -r llmware/requirements.txt```  
+
+2.  **install requirements_extras.txt** - inside the /llmware path - e.g., ```pip3 install -r llmware/requirements_extras.txt```  (Depending upon your use case, you may not need all or any of these installs, but some of these will be used in the examples.)  
+
+3.  **run examples** - copy one or more of the example .py files into the root project path.   (We have seen several IDEs that will attempt to run interactively from the nested /example path, and then not have access to the /llmware module - the easy fix is to just copy the example you want to run into the root path).  
+
+4.  **install vector db** - no-install vector db options include milvus lite, chromadb, faiss and lancedb - which do not require a server install, but do require that you install the python sdk library for that vector db, e.g., `pip3 install pymilvus`, or `pip3 install chromadb`.  If you look in [examples/Embedding](https://github.com/llmware-ai/llmware/tree/main/examples/Embedding), you will see examples for getting started with various vector DB, and in the root of the repo, you will see easy-to-get-started docker compose scripts for installing milvus, postgres/pgvector, mongo, qdrant, neo4j, and redis.  
+
+5.  Note:  we have seen recently issues with Pytorch==2.3 on some platforms - if you run into any issues, we have seen that uninstalling Pytorch and downleveling to Pytorch==2.1 usually solves the problem.  
+
 <details>  
     
 <summary> ✨  <b>Roadmap - Where are we going ... </b>  </summary>
@@ -779,9 +798,8 @@ After cloning the repo, depending upon your IDE enviroment, you may need to take
 - 💡 Enterprise scalability - containerization, worker deployments and Kubernetes  
 - 💡 Integration of SQL and other scale enterprise data sources  
 - 💡 Multi-step, multi-model Agent-based workflows with small, specialized function-calling models  
-- 💡 New Documentation - **Coming Soon**  
 
-Like our models, we aspire for llmware to be "small, but mighty" - easy to use and get started, but packing a powerful punch!
+Like our models, we aspire for llmware to be "small, but mighty" - easy to use and get started, but packing a powerful punch!  
 
 </details>
 
@@ -791,12 +809,27 @@ Questions and discussions are welcome in our [github discussions](https://github
 
 ## 📣  Release notes and Change Log  
 
-**Friday, May 17 - v0.2.14-WIP**  
+See also [additional deployment/install release notes in wheel_archives](https://github.com/llmware-ai/llmware/tree/main/wheel_archives)   
+
+**Tuesday, June 4 - v0.3.0**  
+- Added support for new Milvus Lite embedded 'no-install' database - see [example](https://github.com/llmware-ai/llmware/tree/main/examples/Embedding/using_milvus_lite.py).   
+- Added two new SLIM models to catalog and agent processes - ['q-gen'](https://github.com/llmware-ai/llmware/tree/main/examples/SLIM-Agents/using-slim-q-gen.py) and ['qa-gen'](https://github.com/llmware-ai/llmware/tree/main/examples/SLIM-Agents/using-slim-qa-gen.py)    
+- Updated model class instantiation to provide more extensibility to add new classes in different modules  
+- New welcome_to_llmware.sh and welcome_to_llmware_windows.sh fast install scripts  
+- Enhanced Model class base with new configurable post_init and register methods  
+- Created InferenceHistory to track global state of all inferences completed  
+- Multiple improvements and updates to logging at module level  
+- Note: starting with v0.3.0, pip install provides two options - a base minimal install `pip3 install llmware` which will support most use cases, and a larger install `pip3 install 'llmware[full]'` with other commonly-used libraries.  
+  
+**Wednesday, May 22 - v0.2.15**  
+- Improvements in Model class handling of Pytorch and Transformers dependencies (just-in-time loading, if needed)  
+- Expanding API endpoint options and inference server functionality - see new [client access options](https://github.com/llmware-ai/llmware/tree/main/examples/Use_Cases/llmware_inference_api_client.py)  and [server_launch](https://github.com/llmware-ai/llmware/tree/main/examples/Use_Cases/llmware_inference_server.py)  
+
+**Saturday, May 18 - v0.2.14**  
 - New OCR image parsing methods with [example](https://github.com/llmware-ai/llmware/tree/main/examples/Use_Cases/slicing_and_dicing_office_docs.py)  
 - Adding first part of logging improvements (WIP) in Configs and Models.    
 - New embedding model added to catalog - industry-bert-loans.  
 - Updates to model import methods and configurations.  
-- Changes merged into main repo with PyPi release scheduled for the weekend.  
 
 **Sunday, May 12 - v0.2.13**  
 - New GGUF streaming method with [basic example](https://github.com/llmware-ai/llmware/tree/main/examples/Models/gguf_streaming.py) and [phi3 local chatbot](https://github.com/llmware-ai/llmware/tree/main/examples/UI/gguf_streaming_chatbot.py)  

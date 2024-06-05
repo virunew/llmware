@@ -12,7 +12,7 @@ permalink: /
     </li>
 </ul>  
 
-## 🧰🛠️🔩The Ultimate Toolkit for Building LLM Apps
+## 🧰🛠️🔩The Ultimate Toolkit for Enterprise RAG Pipelines with Small, Specialized Models   
 
 From quickly building POCs to scalable LLM Apps for the enterprise, LLMWare is packed with all the tools you need. 
 
@@ -28,7 +28,7 @@ Our specific focus is on making it easy to integrate open source small specializ
 1.  Install llmware - `pip3 install llmware`  
 
 
-2.  Make sure that you are running on a [supported platform](platforms.md/#platform-support).  
+2.  Make sure that you are running on a [supported platform](https://www.github.com/llmware-ai/llmware/tree/main/docs/platforms.md#platform-support).  
 
 
 3.  Learn by example:  
@@ -90,6 +90,17 @@ git clone git@github.com:llmware-ai/llmware.git
 
 - Please ensure that you are capturing and updating the /llmware/lib folder, which includes required compiled shared libraries.  If you prefer, you can keep only those libs required for your OS platform.  
 
+- After cloning the repo, we provide a short 'welcome to llmware' automation script, which can be used to install the projects requirements (from llmware/requirements.txt), install several optional dependencies that are commonly used in examples, copy several good 'getting started' examples into the root folder, and then run a 'welcome_example.py' script to get started using our models.  To use the "welcome to llmware" script:  
+
+Windows:  
+```bash
+.\welcome_to_llmware_windows.sh
+```
+
+Mac/Linux:
+```bash
+sh ./welcome_to_llmware.sh
+```
 
 # More information about the project - [see main repository](https://www.github.com/llmware-ai/llmware.git)
 

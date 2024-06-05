@@ -1,4 +1,4 @@
-# Copyright 2023 llmware
+# Copyright 2023-2024 llmware
 
 # Licensed under the Apache License, Version 2.0 (the "License"); you
 # may not use this file except in compliance with the License.  You
@@ -23,10 +23,10 @@ import ast
 import time
 from collections import deque
 import shutil
+import importlib
+from importlib import util
 
-from torch import tensor, nn, cuda, no_grad, ones, long, LongTensor, argmax, multinomial, cat, squeeze
-
-from llmware.util import Utilities
+from llmware.util import Utilities, AgentWriter
 from llmware.configs import LLMWareConfig
 from llmware.resources import CloudBucketManager
 from llmware.exceptions import (DependencyNotInstalledException, ModuleNotFoundException,
@@ -38,29 +38,46 @@ from llmware.model_configs import (global_model_repo_catalog_list, global_model_
 from llmware.gguf_configs import *
 from llmware.gguf_configs import _LlamaModel, _LlamaContext, _LlamaBatch, _LlamaTokenDataArray
 
-from transformers import logging as transformers_logging
-transformers_logging.set_verbosity_error()
+#   torch - import only if needed
+#   --torch is a required dependency for HFGenerativeModels and HFEmbeddingModels
+#   --if either of those classes is called, Torch will be imported at that time
+torch = None
+GLOBAL_TORCH_IMPORT = False
 
-logging.basicConfig(format=LLMWareConfig().get_logging_format(),
-                    level=LLMWareConfig().get_logging_level())
+logger = logging.getLogger(__name__)
+logger.setLevel(level=LLMWareConfig().get_logging_level_by_module(__name__))
 
 
 class _ModelRegistry:
 
-    """ ModelRegistry class is wrapper class around the global_model_repo_catalog_list for easy dynamic updating """
+    """ ModelRegistry class is wrapper class around the global_model_repo_catalog_list for easy dynamic updating,
+     and holds most of the key Model, ModelClass and Function/Tool mappings and configurations. """
 
     #   notes:
     #   --held out as internal global cls to keep options to adapt implementation over time
-    #   --shifted to internal class - not to be directly accessed -> make changes through ModelCatalog
+    #   --generally does not to be directly accessed -> make changes through ModelCatalog
 
     #   pulls default model list from model_configs.py
     registered_models = global_model_repo_catalog_list
 
-    model_classes = ["HFGenerativeModel", "LLMWareModel", "GGUFGenerativeModel", "WhisperCPPModel",
-                     "LLMWareSemanticModel", "HFEmbeddingModel", "OpenChatModel", "OllamaModel",
-                     "OpenAIGenModel", "ClaudeModel", "GoogleGenModel",
-                     "CohereGenModel", "JurassicModel", "AIBReadGPTModel",
-                     "OpenAIEmbeddingModel", "CohereEmbeddingModel","GoogleEmbeddingModel"]
+    #   global list of supported model classes with module lookup - and placeholder for other attributes over time
+    model_classes = {"HFGenerativeModel": {"module": "llmware.models", "open_source":True},
+                     "LLMWareModel": {"module": "llmware.models", "open_source": True},
+                     "GGUFGenerativeModel": {"module": "llmware.models", "open_source":True},
+                     "WhisperCPPModel": {"module": "llmware.models", "open_source": True},
+                     "LLMWareSemanticModel": {"module": "llmware.models", "open_source": True},
+                     "HFEmbeddingModel": {"module": "llmware.models", "open_source": True},
+                     "OpenChatModel": {"module": "llmware.models", "open_source": True},
+                     "OllamaModel":{"module": "llmware.models", "open_source": True},
+                     "OpenAIGenModel":{"module": "llmware.models", "open_source": False},
+                     "ClaudeModel":{"module": "llmware.models", "open_source": False},
+                     "GoogleGenModel":{"module": "llmware.models", "open_source": False},
+                     "CohereGenModel":{"module": "llmware.models", "open_source": False},
+                     "JurassicModel":{"module": "llmware.models", "open_source": False},
+                     "OpenAIEmbeddingModel":{"module": "llmware.models", "open_source": False},
+                     "CohereEmbeddingModel":{"module": "llmware.models", "open_source": False},
+                     "GoogleEmbeddingModel":{"module": "llmware.models", "open_source": False}
+                     }
 
     #   model card validation for registering new model - required attributes
     min_required_fields = ["model_name", "model_family", "model_category"]
@@ -69,13 +86,14 @@ class _ModelRegistry:
     #   we are treating these "prompt_wrappers" as core attributes of the model
     prompt_wrappers = ["alpaca", "human_bot", "chatgpt", "<INST>", "open_chat", "hf_chat", "chat_ml", "phi_3",
                        "llama_3_chat"]
+
     registered_wrappers = global_model_finetuning_prompt_wrappers_lookup
 
-    #   list of function calling classifier tools
+    #   list of specialized function calling tools
 
     llm_fx_tools = ["ner", "sentiment", "topics", "ratings", "emotions", "nli",
                     "intent", "sql", "answer", "category", "tags", "summary", "xsum", "extract",
-                    "boolean", "sa-ner","tags-3b"]
+                    "boolean", "sa-ner","tags-3b", "q_gen", "qa_gen"]
 
     llm_fx_tools_map = {"ner": "slim-ner-tool",
                         "sentiment": "slim-sentiment-tool",
@@ -88,18 +106,33 @@ class _ModelRegistry:
                         "answer": "bling-answer-tool",
                         "category": "slim-category-tool",
                         "intent": "slim-intent-tool",
-                        # new tools added
                         "summary": "slim-summary-tool",
                         "xsum": "slim-xsum-tool",
                         "extract": "slim-extract-tool",
                         "boolean": "slim-boolean-tool",
                         "sa-ner": "slim-sa-ner-tool",
-                        "tags-3b": "slim-tags-3b-tool"
+                        "tags-3b": "slim-tags-3b-tool",
+                        "q_gen": "slim-q-gen-tiny-tool",
+                        "qa_gen": "slim-qa-gen-tiny-tool"
                         }
+
     @classmethod
     def get_model_list(cls):
         """ List current view of registered models """
         return cls.registered_models
+
+    @classmethod
+    def get_model_classes(cls):
+        """ List of model classes supported in LLMWare. """
+        return cls.model_classes
+
+    @classmethod
+    def add_model_class(cls, new_class, module="llmware.models", open_source=False):
+
+        """ Adds a new model with flexibility to instantiate in new module. By default, it
+        assumes that the module is the current one, e.g., 'llmware.models'. """
+
+        cls.model_classes.update({new_class:{"module": module, "open_source": open_source}})
 
     @classmethod
     def get_wrapper_list(cls):
@@ -248,23 +281,7 @@ class ModelCatalog:
         #   Easy to create "model repo" with mix of model types and instantiation approaches
         #   Builds on standard model classes with standard inference
 
-        self.model_classes = [
-                                # generative model classes
-                                "OpenAIGenModel", "ClaudeModel", "GoogleGenModel",
-                                "CohereGenModel", "JurassicModel", "AIBReadGPTModel",
-                                "HFGenerativeModel", "LLMWareModel", "GGUFGenerativeModel",
-                                "OpenChatModel", "OllamaModel","WhisperCPPModel",
-
-                                # embedding model classes
-                                "LLMWareSemanticModel",
-                                "OpenAIEmbeddingModel", "CohereEmbeddingModel",
-                                "GoogleEmbeddingModel", "HFEmbeddingModel"
-                             ]
-
-        self.open_source_model_classes = ["HFGenerativeModel", "LLMWareModel", "GGUFGenerativeModel",
-                                          "LLMWareSemanticModel","HFEmbeddingModel", "OpenChatModel",
-                                          "OllamaModel", "WhisperCPPModel"]
-
+        self.model_classes = _ModelRegistry().get_model_classes()
         self.global_model_list = _ModelRegistry().get_model_list()
 
         self.account_name = None
@@ -285,7 +302,7 @@ class ModelCatalog:
         # will add to check manifest in global repo and make available for pull down
         return 0
 
-    def save_model_registry(self, fp=None, fn="llmware_supported_models_manifest.json"):
+    def save_model_registry(self, fp=None, fn="llmware_model_catalog.json"):
 
         """ Utility method to export global model list to json file """
 
@@ -298,7 +315,7 @@ class ModelCatalog:
 
         return 0
 
-    def load_model_registry(self, fp=None, fn="llmware_supported_models_manifest.json"):
+    def load_model_registry(self, fp=None, fn="llmware_model_catalog.json"):
 
         """ Utility method to load global model list from json file.  Will remove the current
         global model list and replace with the model cards from file. """
@@ -312,8 +329,22 @@ class ModelCatalog:
 
         self.global_model_list = _ModelRegistry().get_model_list()
 
-        for i, model in enumerate(self.global_model_list):
-            logging.debug(f"models: {i} - {model}")
+        return 0
+
+    def add_model_cards_from_file(self, fp=None, fn="custom_models_manifest.json"):
+
+        """ Utility method that loads model cards from a single json file and incrementally adds
+        to the model global model list.  """
+
+        if not fp:
+            fp = LLMWareConfig().get_model_repo_path()
+
+        model_add_list = json.load(open(os.path.join(fp, fn), "r"))
+
+        for i, model in enumerate(model_add_list):
+            _ModelRegistry().add_model(model)
+
+        self.global_model_list = _ModelRegistry().get_model_list()
 
         return 0
 
@@ -321,9 +352,10 @@ class ModelCatalog:
 
         """ Registers a new model card directly in the model catalog """
 
-        # register new model
         _ModelRegistry().add_model(model_card_dict)
-        # self.global_model_list.append(model_card_dict)
+
+        #   update the global list in ModelCatalog instance
+        self.global_model_list = _ModelRegistry().get_model_list()
 
         return 0
 
@@ -333,10 +365,30 @@ class ModelCatalog:
 
         _ModelRegistry().delete_model(model_name)
 
+        #   update current ModelCatalog instance
+        self.global_model_list = _ModelRegistry().get_model_list()
+
         return 0
 
     def register_new_finetune_wrapper(self, name, main_start="", main_stop="", llm_start="",
                                       system_start="", system_stop=""):
+
+        """ Registers a new fine-tuning wrapper using a basic template that assembles a prompt and will add
+        special tokens as indicated in the wrapper:
+
+            -- main_start - token, if any, to be provided at the start of the prompt template
+            -- main_stop  - token, if any, to be provided at the end of the main 'user' input
+            -- llm_start  - token, if any, at the end of the prompt that is the signal to start the 'assistant' role
+            -- system_start - optional token to start an initial segment indicating a 'system' instruction
+            -- system_stop  - optional token to stop an initial segment indicating a 'system' instruction.
+
+            For example, the LLama-2-Chat wrapper is implemented as follows:
+
+                main_start = "<INST>"
+                main_stop  = "</INST>
+                llm_start  = ""
+
+        """
 
         new_dict = {"main_start": main_start, "main_stop": main_stop, "start_llm_response": llm_start,
                     "system_start": system_start, "system_stop": system_stop}
@@ -346,18 +398,41 @@ class ModelCatalog:
         return 0
 
     def get_list_registered_finetune_wrappers(self):
+
+        """ Returns an updated list of registered fine-tuning wrappers. """
+
         return _ModelRegistry().get_wrapper_list()
 
-    def register_new_hf_generative_model(self, hf_model_name=None, context_window=2048, prompt_wrapper="<INST>",
-                                         display_name=None, temperature=0.3, trailing_space="", link=""):
+    def register_new_hf_generative_model(self, hf_model_name, llmware_lookup_name=None, display_name=None,
+                                         context_window=2048, prompt_wrapper="<INST>",
+                                         temperature=0.3, trailing_space="", link=""):
+
+        """ Registers any Huggingface Generative Model in the ModelCatalog for easy future lookup and
+        integration into LLMWare RAG workflows.
+
+        The most important input parameter is hf_model_name, which should correspond to the Huggingface Repo/Model
+        format, e.g., microsoft/phi-2
+
+        Any names can be assigned as 'aliases' for the LLMWare Model catalog with both a main lookup name and an
+        optional secondary lookup to be used as a short-name for screen display.
+
+        For example, the 'llmware_lookup_name' for 'microsoft/phi-2' could be 'phi-2'
+        or 'my-favorite-model-with-2-in-the-name'.
+
+        If no llmware_lookup_name is provided, then it will automatically save as the hf_model_name. """
+
+        if not llmware_lookup_name:
+            llmware_lookup_name = hf_model_name
 
         if not display_name:
             display_name = hf_model_name
 
-        model_card = {"model_name": hf_model_name,
+        model_card = {"model_name": llmware_lookup_name,
                       "context_window": context_window,
                       "prompt_wrapper": prompt_wrapper,
 
+                      # hf_model_name should correspond to the hf repo/model standard
+                      "hf_repo": hf_model_name,
                       "display_name": display_name, "temperature": temperature, "trailing_space": trailing_space,
                       "model_family": "HFGenerativeModel", "model_category": "generative_local",
                       "model_location": "hf_repo", "instruction_following": False,
@@ -366,17 +441,23 @@ class ModelCatalog:
 
         _ModelRegistry().add_model(model_card)
 
+        self.global_model_list = _ModelRegistry().get_model_list()
+
         return model_card
 
     def register_sentence_transformer_model(self, model_name, embedding_dims, context_window,
                                             display_name=None, link=""):
+
+        """ Registers a model from the SentenceTransformers library into an LLMWare Model Catalog.
+
+        NOTE: for SentenceTransformers, the model_name should match the SentenceTransformer library lookup
+        name.  """
 
         if not display_name:
             display_name = model_name
 
         new_model_card_dict = {"model_name": model_name, "context_window": context_window,
                                "embedding_dims": embedding_dims,
-
                                # pre-populated parameters for sentence transformer
                                "model_family": "LLMWareSemanticModel", "model_category": "embedding",
                                "display_name": display_name, "link": link,
@@ -386,13 +467,26 @@ class ModelCatalog:
 
         _ModelRegistry().add_model(new_model_card_dict)
 
+        self.global_model_list = _ModelRegistry().get_model_list()
+
         return new_model_card_dict
 
     def register_gguf_model(self, model_name, gguf_model_repo, gguf_model_file_name, prompt_wrapper=None,
                             eos_token_id=0, display_name=None,trailing_space="", temperature=0.3,
                             context_window=2048, instruction_following=True):
 
-        """ Registers a new GGUF model in model catalog - alternative to adding directly in the ModelRegistry """
+        """ Registers a new GGUF model in model catalog - by default, assumes that the GGUF file is in a Huggingface
+        repository, and will be pulled directly from that repository into a local model_repo cache.
+
+        Any arbitrary name can be selected as the model_name and/or display_name for the llmware catalog, as the
+        core lookup is in the "gguf_repo" and "gguf_file" parameters.
+
+        If the GGUF file is in another local file path, then you can access it directly by setting:
+
+            "custom_model_repo": "/path/to/local/gguf_model/"
+            "custom_model_files": "my_model.gguf"
+
+        """
 
         if not display_name:
             display_name = model_name
@@ -409,20 +503,19 @@ class ModelCatalog:
                                }
 
         _ModelRegistry().add_model(new_model_card_dict)
-        # self.global_model_list.append(new_model_card_dict)
+
+        self.global_model_list = _ModelRegistry().get_model_list()
 
         return new_model_card_dict
 
-    def register_open_chat_model(cls, model_name, api_base=None, model_type="chat", display_name=None,
-                            context_window=4096, instruction_following=True, prompt_wrapper="",
-                            temperature=0.5):
+    def register_open_chat_model(self, model_name, api_base=None, model_type="chat", display_name=None,
+                                 context_window=4096, instruction_following=True, prompt_wrapper="",
+                                 temperature=0.5):
 
-        """ Add any open chat model into Model Registry, e.g.,
+        """ Add any open chat model into the LLMWare Model Catalog for easy access, e.g.,
 
-         _ModelRegistry().add_open_chat_model("my_open_chat_model1",
-                                            api_base="http://localhost:1234/v1",
-                                            prompt_wrapper="<INST>",
-                                            model_type="chat")
+         ModelCatalog().register_open_chat_model("my_open_chat_model1", api_base="http://localhost:1234/v1",
+                                                 prompt_wrapper="<INST>", model_type="chat")
 
          To invoke the model:
 
@@ -448,21 +541,15 @@ class ModelCatalog:
 
         _ModelRegistry().add_model(new_model_card_dict)
 
+        self.global_model_list = _ModelRegistry().get_model_list()
+
         return 0
 
-    def register_ollama_model(cls, model_name,
-                              host="localhost",
-                              port=11434,
-                              model_type="chat",
-                              raw=False,
-                              stream=False,
-                              display_name=None,
-                              context_window=4096,
-                              instruction_following=True,
-                              prompt_wrapper="",
-                              temperature=0.5):
+    def register_ollama_model(self, model_name, host="localhost", port=11434, model_type="chat",
+                              raw=False, stream=False, display_name=None, context_window=4096,
+                              instruction_following=True, prompt_wrapper="", temperature=0.5):
 
-        """ Add any Ollama model into Model Registry - key parameters:
+        """ Add any Ollama model into Model Catalog - key parameters:
 
         Assumes -
         1.  default host/port configs of "localhost:11434"
@@ -493,6 +580,8 @@ class ModelCatalog:
                                }
 
         _ModelRegistry().add_model(new_model_card_dict)
+
+        self.global_model_list = _ModelRegistry().get_model_list()
 
         return 0
 
@@ -596,7 +685,6 @@ class ModelCatalog:
             if "snapshot" in model_card:
                 # pull snapshot from gguf repo in model card
                 model_repo = model_card["gguf_repo"]
-                # replacing:  model_repo = model_card["model_name"]
                 self.pull_snapshot_from_hf(model_repo, model_location, api_key=api_key)
             else:
                 # general case
@@ -609,13 +697,10 @@ class ModelCatalog:
         
         raise ModelNotFoundException(model_folder_name)
 
-    def _instantiate_model_class_from_string(self, model_class, model_name, model_card, api_key=None):
+    def _instantiate_model_class_from_string(self, model_class, model_name, model_card, api_key=None,
+                                             api_endpoint=None):
 
-        """ Internal utility method to instantiate model classes from strings.
-
-        NOTE: this method will be replaced and deprecated for importlib dynamic lookup in upcoming release.
-
-        """
+        """ Internal utility method to instantiate model classes from strings. """
 
         # by default - if model not found - return None
         my_model = None
@@ -625,107 +710,37 @@ class ModelCatalog:
         if "context_window" in model_card:
             context_window = model_card["context_window"]
 
+        if "embedding_dims" in model_card:
+            embedding_dims = model_card["embedding_dims"]
+
         if model_class in self.model_classes:
 
-            # generative models
-            if model_class == "ClaudeModel": my_model = ClaudeModel(model_name=model_name,
-                                                                    context_window=context_window,
-                                                                    api_key=api_key)
+            module = self.model_classes[model_class]["module"]
+            model_module = importlib.import_module(module)
+            if hasattr(model_module, model_class):
+                model_class = getattr(model_module, model_class)
 
-            if model_class == "OpenAIGenModel": my_model = OpenAIGenModel(model_name=model_name,
-                                                                          context_window=context_window,
-                                                                          api_key=api_key)
-
-            if model_class == "CohereGenModel": my_model = CohereGenModel(model_name=model_name,
-                                                                          context_window=context_window,
-                                                                          api_key=api_key)
-
-            if model_class == "JurassicModel": my_model = JurassicModel(model_name=model_name,
-                                                                        context_window=context_window,
-                                                                        api_key=api_key)
-
-            if model_class == "GoogleGenModel": my_model = GoogleGenModel(model_name=model_name,
-                                                                          context_window=context_window,
-                                                                          api_key=api_key)
-
-            if model_class == "OpenChatModel": my_model = OpenChatModel(model_name=model_name,
-                                                                        context_window=context_window,
-                                                                        api_key=api_key, model_card=model_card)
-
-            if model_class == "OllamaModel": my_model = OllamaModel(model_name=model_name,
-                                                                    context_window=context_window,
-                                                                    api_key=api_key, model_card=model_card)
-
-            # stub for READ GPT provided -> will add other 3rd party models too
-            if model_class == "AIBReadGPTModel": my_model = AIBReadGPTModel(model_name=model_name,api_key=api_key)
-
-            # *new* - stub for LLMWare Model
-            if model_class == "LLMWareModel":
-                my_model = LLMWareModel(model_name=model_name,api_key=api_key)
-
-            # embedding models
-
-            if "embedding_dims" in model_card:
-                embedding_dims = model_card["embedding_dims"]
-
-            if model_class == "OpenAIEmbeddingModel": my_model = OpenAIEmbeddingModel(model_name=model_name,
-                                                                                      embedding_dims=embedding_dims,
-                                                                                      api_key=api_key,
-                                                                                      model_card=model_card)
-
-            if model_class == "CohereEmbeddingModel": my_model = CohereEmbeddingModel(model_name=model_name,
-                                                                                      embedding_dims=embedding_dims,
-                                                                                      api_key=api_key,
-                                                                                      model_card=model_card)
-
-            if model_class == "GoogleEmbeddingModel": my_model = GoogleEmbeddingModel(model_name=model_name,
-                                                                                      embedding_dims=embedding_dims,
-                                                                                      api_key=api_key,
-                                                                                      model_card=model_card)
-
-            if model_class == "LLMWareSemanticModel": my_model = LLMWareSemanticModel(model_name=model_name,
-                                                                                      embedding_dims=embedding_dims,
-                                                                                      api_key=api_key,
-                                                                                      model_card=model_card)
-
-            # HF models
-            if model_class == "HFGenerativeModel":
-                my_model = HFGenerativeModel(model_name=model_name,api_key=api_key, trust_remote_code=True,
-                                             model_card=model_card,
-                                             # new options added
-                                             use_gpu_if_available=self.use_gpu,
-                                             get_logits=self.get_logits,
-                                             temperature=self.temperature,
-                                             max_output=self.max_output,
-                                             sample=self.sample)
-
-            if model_class == "GGUFGenerativeModel":
-
-                my_model = GGUFGenerativeModel(model_name=model_name, api_key=api_key, model_card=model_card,
-                                               # new configuration options
-                                               use_gpu_if_available=True,
-                                               get_logits=self.get_logits,
-                                               temperature=self.temperature,
-                                               max_output=self.max_output,
-                                               sample=self.sample
-                                                )
-
-            if model_class == "HFEmbeddingModel": my_model = HFEmbeddingModel(model_name=model_name,
-                                                                              api_key=api_key,
-                                                                              embedding_dims=embedding_dims,
-                                                                              model_card=model_card,
-                                                                              trust_remote_code=True)
-
-            if model_class == "WhisperCPPModel":
-
-                my_model = WhisperCPPModel(model_name=model_name,model_card=model_card)
+                my_model = model_class(model_name=model_name, context_window=context_window,
+                                       api_key=api_key,
+                                       trust_remote_code=True,
+                                       model_card=model_card,
+                                       use_gpu_if_available=self.use_gpu,
+                                       get_logits=self.get_logits,
+                                       temperature=self.temperature,
+                                       max_output=self.max_output,
+                                       sample=self.sample,
+                                       embedding_dims=embedding_dims,
+                                       api_endpoint=api_endpoint)
+        else:
+            raise LLMWareException(message=f"Exception: {model_class} not found.")
 
         return my_model
 
     def load_model (self, selected_model, api_key=None, use_gpu=True, sample=True,get_logits=False,
-                    max_output=100, temperature=-99, force_reload=False):
+                    max_output=100, temperature=-99, force_reload=False, api_endpoint=None):
 
-        """ Main method for loading and fully instantiating a model based solely on the model's name """
+        """ Main method for loading and fully instantiating a model with lookup based on the model_name in
+         the ModelCatalog. """
 
         # apply optional attributes - will be available to the loaded model
         self.use_gpu=use_gpu
@@ -750,13 +765,13 @@ class ModelCatalog:
             raise ModelNotFoundException(selected_model)
 
         # step 2- instantiate the right model class
-        my_model = self.get_model_by_name(model_card["model_name"], api_key=api_key)
+        my_model = self.get_model_by_name(model_card["model_name"], api_key=api_key,api_endpoint=api_endpoint)
         if not my_model:
             logging.error("error: ModelCatalog - unexpected - could not identify the model - %s ", selected_model)
             raise ModelNotFoundException(selected_model)
 
         # step 3- if physical model, then find the location on local server, and if not available, then pull from s3
-        if model_card["model_location"] == "llmware_repo":
+        if model_card["model_location"] == "llmware_repo" and not api_endpoint:
             loading_directions = self.locate_and_retrieve_model_bits(model_card, api_key=api_key)
             my_model = my_model.load_model_for_inference(loading_directions, model_card=model_card)
         else:
@@ -768,6 +783,9 @@ class ModelCatalog:
 
             # pass model name to the model directly
             my_model.model_name = selected_model
+
+        if api_endpoint and model_card["model_family"] in ["GGUFGenerativeModel", "HFGenerativeModel"]:
+            my_model.api_endpoint = api_endpoint
 
         return my_model
 
@@ -855,9 +873,16 @@ class ModelCatalog:
 
         open_source_models = []
 
+        open_source_class = []
+        model_classes = _ModelRegistry().get_model_classes()
+        for key, value in model_classes.items():
+            if "open_source" in value:
+                if value["open_source"]:
+                    open_source_class.append(key)
+
         for x in self.global_model_list:
 
-            if x["model_family"] in self.open_source_model_classes:
+            if x["model_family"] in open_source_class:
                 open_source_models.append(x)
 
         return open_source_models
@@ -916,7 +941,8 @@ class ModelCatalog:
 
     def model_lookup(self,model_name):
 
-        """ Looks up model by model_name. """
+        """ Looks up model by model_name. Will check both the primary 'model_name' and the secondary/optional
+        display_name to look for a match in the ModelCatalog. """
 
         my_model = None
 
@@ -928,7 +954,7 @@ class ModelCatalog:
 
         return my_model
 
-    def get_model_by_name(self, model_name, api_key=None):
+    def get_model_by_name(self, model_name, api_key=None, api_endpoint=None):
 
         """ Gets and instantiates model by name. """
 
@@ -940,7 +966,8 @@ class ModelCatalog:
             if models["model_name"] == model_name or models["display_name"] == model_name:
                 selected_model = models
                 my_model = self._instantiate_model_class_from_string(selected_model["model_family"],
-                                                                     model_name, models,api_key=api_key)
+                                                                     model_name, models,api_key=api_key,
+                                                                     api_endpoint=api_endpoint)
                 break
 
         return my_model
@@ -951,12 +978,8 @@ class ModelCatalog:
 
         from huggingface_hub import hf_hub_download
 
-        model_name = model_card["model_name"].split("/")[-1]
-
         gguf_file = model_card["gguf_file"]     # e.g., "ggml-model-q4_k_m.gguf",
         gguf_repo = model_card["gguf_repo"]     # e.g., "llmware/dragon-mistral-7b-v0-gguf"
-
-        # model_path = os.path.join(local_model_repo_path, self.model_name)
 
         if not os.path.exists(local_model_repo_path):
             os.mkdir(local_model_repo_path)
@@ -964,6 +987,7 @@ class ModelCatalog:
         logging.info(f"update: logging - pulling model from repo - {gguf_repo} - "
                      f"and will cache into local folder - {local_model_repo_path}")
 
+        #TODO: add better error handling to catch download exceptions and attempt to remediate
         downloader = hf_hub_download(gguf_repo,
                                      gguf_file,
                                      local_dir=local_model_repo_path,
@@ -992,10 +1016,15 @@ class ModelCatalog:
 
     def pull_snapshot_from_hf(self, repo_name, local_model_repo_path, api_key=None):
 
-        """ Pulls snapshot of HF model repository and saves into local folder path. """
+        """ Pulls snapshot of HF model repository and saves into local folder path - two required
+        inputs:
+            -- repo_name - the full name of the Huggingface repo, e.g., microsoft/phi-2
+            -- local_model_repo_path - the local path to save the model files.
+        """
 
         from huggingface_hub import snapshot_download
 
+        #TODO: add exception handling if error in download process
         snapshot = snapshot_download(repo_name, local_dir=local_model_repo_path, token=api_key,
                                      local_dir_use_symlinks=False)
 
@@ -1061,12 +1090,16 @@ class ModelCatalog:
         return 0
 
     def list_llm_tools(self):
+
         """Provides a list of the currently available SLIM tools available in the catalog. """
+
         return _ModelRegistry().get_llm_fx_tools_list()
 
     def get_llm_fx_mapping(self):
+
         """Provides a current mapping of Tools to LLM Function Call - this mapping is used by LLMfx class to
         orchestrate among multiple models deployed locally as tools. """
+
         return _ModelRegistry().get_llm_fx_mapping()
 
     def get_test_script(self, model_name):
@@ -1091,12 +1124,18 @@ class ModelCatalog:
     def tool_test_run(self, model_name, api_key=None, verbose=False,
                       # add more optional configurations to flow thru to the model inference
                       use_gpu=True, sample=True, get_logits=True,
-                      max_output=100, temperature=-99, custom_test_script=None):
+                      max_output=100, temperature=-99, custom_test_script=None,
+                      api_endpoint=None):
 
-        """ Loads a tool, if required, and executes a series of test runs.
-        Note: only available for 'tool' implementation models. """
+        """ Loads a tool, if required, and executes a series of test runs.  Most of the input
+        parameters are optional configuration parameters that will be passed when the model is loaded
+        and instantiated.
+
+        Note: only available for GGUF quantized 'tool' implementation models. """
 
         model_card = self.lookup_model_card(model_name)
+
+        agent_writer = AgentWriter()
 
         if not model_card:
             raise ModelNotFoundException(model_name)
@@ -1104,7 +1143,8 @@ class ModelCatalog:
         if "snapshot" in model_card:
 
             model = self.load_model(model_name, api_key=api_key, use_gpu=use_gpu, sample=sample,
-                                    get_logits=get_logits,max_output=max_output, temperature=temperature)
+                                    get_logits=get_logits,max_output=max_output, temperature=temperature,
+                                    api_endpoint=api_endpoint)
 
             if custom_test_script:
                 #   custom_test_script can be any json file with list of json dictionary entries with
@@ -1118,21 +1158,23 @@ class ModelCatalog:
                 if "function_call" not in model_card:
 
                     # run traditional inference on test set
-                    print("\nTest: ", model_name)
+                    agent_writer.write(f"\nTest: {model_name}")
 
                     for i, entries in enumerate(test_set):
 
-                        print("\nupdate: query - ", i, entries["query"])
+                        agent_writer.write(f"\nupdate: query - {i} - {entries['query']}")
 
                         response = model.inference(entries["query"],add_context=entries["context"],
                                                    add_prompt_engineering="default_with_context")
-                        print("update: llm_response - ", i, response["llm_response"])
+
+                        agent_writer.write(f"\nupdate: llm_response - {i} - {response['llm_response']}")
+
                         if "answer" in entries:
-                            print("update: gold answer -  ", i, entries["answer"])
+                            agent_writer.write(f"update: gold answer - {i} - {entries['answer']}")
 
                 else:
 
-                    print("\nTest: ", model_name)
+                    agent_writer.write(f"\nTest: {model_name}")
 
                     for i, entries in enumerate(test_set):
 
@@ -1151,31 +1193,31 @@ class ModelCatalog:
                             response = model.function_call(text)
 
                         # if verbose:
-                        print(f"\nupdate: context - test - {i} - {text}")
+                        agent_writer.write(f"\nupdate: context - test - {i} - {text}")
 
-                        print("update: 'llm_response' - test - ", i, response["llm_response"])
-
-                        # print("update: 'output_tokens' - test - ", i, response["output_tokens"])
+                        agent_writer.write(f"update: 'llm_response' - test - {i} - {response['llm_response']}")
 
                         logit_analysis = self.logit_analysis(response, model_card, model.hf_tokenizer_name,
                                                              api_key=api_key)
 
                         if "ryg_string" in logit_analysis:
-                            print("update: red-yellow-green confidence - ", logit_analysis["ryg_string"])
+                            agent_writer.write(f"update: red-yellow-green confidence - {logit_analysis['ryg_string']}")
 
                         if "confidence_score" in logit_analysis:
-                            print("update: confidence score - ", logit_analysis["confidence_score"])
+                            agent_writer.write(f"update: confidence score - {logit_analysis['confidence_score']}")
 
                         if "marker_tokens" in logit_analysis:
                             if logit_analysis["marker_tokens"]:
-                                print("update: marker tokens - ", logit_analysis["marker_tokens"])
+                                agent_writer.write(f"update: marker tokens - {logit_analysis['marker_tokens']}")
 
                         if "choices" in logit_analysis:
                             choices = logit_analysis["choices"]
                             if len(choices) > 0:
                                 choices = choices[0]
 
-                            print("update: choices - ", choices)
+                            agent_writer.write(f"update: choices - {choices}")
+
+        agent_writer.close()
 
         return 0
 
@@ -1240,18 +1282,31 @@ class ModelCatalog:
 
             logits = response["logits"]
 
-            # hf tokenizer name
-            pt_loader = PyTorchLoader(api_key=api_key, trust_remote_code=True, custom_loader=None)
-            tokenizer = pt_loader.get_tokenizer(hf_tokenizer_name)
+            # tokenizer load
+            if "tokenizer_local" in model_card:
+                tokenizer = LocalTokenizer(model_card["tokenizer_local"])
+            elif util.find_spec("transformers"):
+                # hf tokenizer name
+                pt_loader = PyTorchLoader(api_key=api_key, trust_remote_code=True, custom_loader=None)
+                tokenizer = pt_loader.get_tokenizer(hf_tokenizer_name)
+            else:
+                raise LLMWareException(message="Exception: could not identify tokenizer to use")
 
             try:
                 # pull bos attributes from tokenizer
                 bos_token_id = tokenizer.bos_token_id
                 bos_str = tokenizer.bos_token
+
+                eos_token_id = tokenizer.eos_token_id
+                eos_str = tokenizer.eos_token
+
             except:
                 # unexpected - but if fail, then take llama defaults
                 bos_token_id = 1
                 bos_str = "<s>"
+
+                eos_token_id = 2
+                eos_str = "</s>"
 
             ryg_string = ""
 
@@ -1296,7 +1351,8 @@ class ModelCatalog:
                 if "[" in tokenizer.decode(toks):
                     vz_capture_on = True
 
-                if toks == 2:
+                # if toks == 2:
+                if toks == eos_token_id:
                     break
 
                 for x in range(0, len(logits[i])):
@@ -1437,7 +1493,7 @@ class ModelCatalog:
         output_list = []
         current_key = ""
 
-        # print("***test*** - remediation - input string - ", input_string)
+        logger.debug(f"***test*** - remediation - input string - {input_string}")
 
         for y in range(start + 1, len(input_string)):
 
@@ -1582,14 +1638,15 @@ class ModelCatalog:
 
         return sampling_stats
 
-    def get_fx_scores(self,response, hf_tokenizer_name, top_choices=3, logit_count=1, api_key=None):
+    def get_fx_scores(self,response, model_name, top_choices=3, logit_count=1, api_key=None):
 
         """ Provides useful metrics and scores derived from analyzing the logits and output tokens from function call
         llm response - currently only supported for HFGenerative and GGUFGenerative models.
 
         Inputs:
-            -- llm response dictionary, including logits and output tokens
-            -- hf_tokenizer_name for the model, which will be used to decode output tokens, logits and identify key
+            -- llm response dictionary, including logits and output token
+            -- model_name which will be used to lookup the model card and get applicable tokenizer(s)
+            -- tokenizer will be used to decode output tokens, logits and identify key
                 'value zone' markers for the output response, e.g., identify list boundaries '[' and ']'
             -- top_choices - number of candidates to consider in each logit, e.g., top 3 choices considered
             -- logit_count - number of tokens to consider in the value zone, whether the first only, or more
@@ -1602,6 +1659,18 @@ class ModelCatalog:
                 tokens, the percentage taken from the top output logit candidate and a list of the 'sampled', e.g.,
                 'not top' logits taken
         """
+
+        # model name - look up model card
+        model_card = self.lookup_model_card(model_name)
+
+        hf_tokenizer_name = None
+        tokenizer_local = None
+
+        if "tokenizer" in model_card:
+            hf_tokenizer_name = model_card["tokenizer"]
+
+        if "tokenizer_local" in model_card:
+            tokenizer_local = model_card["tokenizer_local"]
 
         # output is a dict of dict
         output = {}
@@ -1625,8 +1694,15 @@ class ModelCatalog:
         else:
             keys_list.append("llm_response")
 
-        pt_loader = PyTorchLoader(api_key=api_key, trust_remote_code=True, custom_loader=None)
-        tokenizer = pt_loader.get_tokenizer(hf_tokenizer_name)
+        # tokenizer load
+        if tokenizer_local:
+            tokenizer = LocalTokenizer(model_card["tokenizer_local"])
+        elif hf_tokenizer_name and util.find_spec("transformers"):
+            # hf tokenizer name
+            pt_loader = PyTorchLoader(api_key=api_key, trust_remote_code=True, custom_loader=None)
+            tokenizer = pt_loader.get_tokenizer(hf_tokenizer_name)
+        else:
+            raise LLMWareException(message="Exception: could not identify tokenizer to use")
 
         vz_choices = []
         vz_capture_on = False
@@ -1657,7 +1733,6 @@ class ModelCatalog:
                     # the output token does not correspond to the logit with the highest score, so there was a
                     # 'sampling' effect to this generation - adding this token and corresponding logit to be saved
                     # and provided as output in 'sampling_stats'
-                    # print("no match: ", i, tokenizer.decode(toks), tokenizer.decode(logits[i][0][0]),toks, logits[i])
                     top_token_not_used.append((i, toks, logits[i]))
 
                 vz_logits += 1
@@ -1772,7 +1847,8 @@ class ModelCatalog:
 
 class PromptCatalog:
 
-    """ PromptCatalog manages prompt styles and prompt wrappers. """
+    """ PromptCatalog manages prompt styles and prompt wrappers and builds prompt templates for inference
+    generation. """
 
     def __init__(self):
 
@@ -1784,6 +1860,8 @@ class PromptCatalog:
 
     def lookup_prompt(self, prompt_name):
 
+        """ Looks up a predefined prompt template by prompt_name. """
+
         for prompts in self.prompt_catalog:
             if prompts["prompt_name"] == prompt_name:
                 return prompts
@@ -1791,9 +1869,15 @@ class PromptCatalog:
         return None
 
     def get_all_prompts(self):
+
+        """ Returns all predefined prompts. """
+
         return self.prompt_catalog
 
     def list_all_prompts(self):
+
+        """ Returns a list of all predefined prompts. """
+
         prompt_list = []
         for prompt in self.prompt_catalog:
             if "prompt_name" in prompt:
@@ -1801,6 +1885,8 @@ class PromptCatalog:
         return prompt_list
 
     def parse_instruction_for_user_vars(self, prompt_card, inference_dict=None):
+
+        """ Utility method that looks for user_vars in prompt card to dynamically insert into Prompt. """
 
         # if no user vars key in prompt_card, then return instruction unchanged
 
@@ -1843,6 +1929,8 @@ class PromptCatalog:
 
     def build_core_prompt(self, prompt_card=None, prompt_name=None, separator="\n", query=None, context=None,
                           inference_dict=None):
+
+        """ Builds the core prompt from the prompt_card template. """
 
         if not context:  context = ""
         if not query: query = ""
@@ -1891,6 +1979,9 @@ class PromptCatalog:
 
     def add_custom_prompt_card(self, prompt_name, run_order_list, prompt_dict, prompt_description=None):
 
+        """ Registers a new custom prompt_card with 'run_order_list' that shows how to assemble the components
+        of a Prompt.  """
+
         new_prompt_card = {"prompt_name": prompt_name,
                            "prompt_description": prompt_description,
                            "run_order": run_order_list}
@@ -1903,6 +1994,8 @@ class PromptCatalog:
         return new_prompt_card
 
     def apply_prompt_wrapper(self, text, prompt_wrapper, separator="\n", instruction=None):
+
+        """ Applies the selected prompt_wrapper to the prompt. """
 
         output_text = text
 
@@ -1919,8 +2012,9 @@ class PromptCatalog:
             wrapped_prompt = self.wrap_custom(text, prompt_wrapper, instruction=instruction)
             return wrapped_prompt
 
-    #   deprecated - replaced by wrap_custom builder function
     def wrap_chat_ml_sample(self, text, separator, instruction):
+
+        """ Deprecated - custom handler for wrap_chat_ml_sample. Replaced by general method. """
 
         if not instruction:
             instruction = "You are a helpful assistant."
@@ -1931,8 +2025,9 @@ class PromptCatalog:
 
         return output_text
 
-    #   wip - create ability to customize template
     def wrap_custom(self, text, wrapper_type, instruction=None):
+
+        """ Builds wrapper on Prompt based on the selected wrapper_type. """
 
         prompt_out = ""
 
@@ -1971,6 +2066,8 @@ class PromptCatalog:
 
     def wrap_chatgpt_sample(self, text, instruction):
 
+        """ Applies chatgpt format wrapper to a prompt. """
+
         if not instruction:
             instruction = "You are a helpful assistant."
 
@@ -1979,45 +2076,246 @@ class PromptCatalog:
 
         return new_sample
 
-    # deprecated - replaced by wrap_custom builder function
     def wrap_human_bot_sample(self, text, user_separator="<human>: ", response_separator="<bot>:"):
+
+        """ Applies 'human-bot' wrapper to a prompt.  Deprecated and replaced by general method.  """
+
         content = user_separator + text + "\n" + response_separator
+
         return content
 
-    #   deprecated
     def wrap_llama2_chat_sample(self, text, separator):
+
+        """ Applies 'llama2 - INST' wrapper to a prompt.  Deprecated and replaced by general method.  """
+
         content = "<INST> " + text + "</INST>"
+
         return content
 
-    #   deprecated
     def wrap_alpaca_sample(self, text, separator="\n"):
+
+        """ Applies 'Alpaca style' wrapper to a prompt.  Deprecated and replaced by general method.  """
+
         content = "### Instruction: " + text + separator + "### Response: "
+
         return content
 
-    #   deprecated
     def wrap_openchat_sample(self, text, separator="\n"):
+
+        """ Applies 'openchat style' wrapper to a prompt.  Deprecated and replaced by general method.  """
+
         content = "GPT4 User: " + text + "<|endofturn|>" + "GPT4 Assistant:"
+
         return content
 
-    #   deprecated
     def wrap_hf_chat_zephyr_sample(self, text, separator="\n"):
+
+        """ Applies 'HF Chat - Zephyr style' wrapper to a prompt.  Deprecated and replaced by general method.  """
+
         content = "<|system|>You are a helpful assistant.\n</s>" + \
                   "<|user|>" + text + "\n</s>" + \
                   "<|assistant|>"
+
         return content
 
 
-class OpenChatModel:
+class InferenceHistory:
+
+    """ Global State History of All Inferences Completed in Session """
+
+    base_model_keys = ["llm_response", "usage", "logits", "output_tokens", "prompt", "add_context","final_prompt",
+                       "model_name", "model_card", "temperature", "add_prompt_engineering",
+                       "model_class", "model_category", "prompt_wrapper", "time_stamp"
+                       ]
+
+    inference_history = []
+
+    global_inference_counter = 0
+
+    save = True
+
+    @classmethod
+    def get_base_model_keys(cls):
+        return cls.base_model_keys
+
+    @classmethod
+    def add_base_model_key(cls, new_key):
+        if new_key not in cls.base_model_keys:
+            cls.base_model_keys.append(new_key)
+        return True
+
+    @classmethod
+    def del_base_model_key(cls, key_to_delete):
+        if key_to_delete in cls.base_model_keys:
+            del cls.base_model_keys[key_to_delete]
+        return True
+
+    @classmethod
+    def get_transactions(cls):
+        """ List current view of implemented supported vector db for embeddings. """
+        return cls.inference_history
+
+    @classmethod
+    def add_transaction(cls, model_state_dict):
+        """ Adds a vector db including the module and class. """
+        cls.inference_history.append(model_state_dict)
+        return True
+
+    @classmethod
+    def get_global_inference_count(cls):
+        return cls.global_inference_counter
+
+    @classmethod
+    def increment_global_inference_count(cls):
+        cls.global_inference_counter += 1
+        return cls.global_inference_counter
+
+    @classmethod
+    def reset_global_inference_count(cls):
+        cls.global_inference_counter = 0
+        return cls.global_inference_counter
+
+    @classmethod
+    def get_save_status(cls):
+        return cls.save
+
+    @classmethod
+    def set_save_status(cls, status):
+        if isinstance(status, bool):
+            cls.save = status
+        else:
+            raise LLMWareException(message="Exception: save status must be boolean - True/False")
+
+
+def register(kv_dict):
+
+    """ Default register function called after each Model inference activity.  This method can be over-ridden and
+     customized by re-routing the LLMWareConfig as follows:
+
+        `LLMWareConfig().set_config('model_register', {'module': 'my_module', 'class': 'my_register_fx'})
+
+        `module` currently points to this module:   'llmware.models'
+        `class` currently points to this method:    'register'
+    """
+
+    #   if save status set to False, then skip
+    if not InferenceHistory().get_save_status():
+        logger.debug(f"update: skipping registration since save status is False")
+        return True
+
+    for k, v in kv_dict.items():
+        logger.debug(f"update: register: {k} - {v}")
+
+    InferenceHistory().increment_global_inference_count()
+
+    logger.debug(f"update: global inference counter - {InferenceHistory().get_global_inference_count()}")
+
+    #   by default, will register all generative inferences, but takes no action to track embedding inferences
+    if "model_category" in kv_dict:
+        if kv_dict["model_category"] == "generative":
+            InferenceHistory().add_transaction(kv_dict)
+
+    return True
+
+
+def post_init(kv_dict):
+
+    """ Not implemented by default. """
+    logger.debug(f"update: in post_init - not implemented - returning True - no action taken")
+
+    return True
+
+
+class BaseModel:
+
+    """ BaseModel class subclassed by all models. Should not be instantiated directly.   Provides several
+    common utility methods across each of the Model class implementations.  """
+
+    def __init__(self, **kwargs):
+
+        # InferenceHistory provides a set of state parameters to be captured from each Model instantiation
+        self.base_model_keys = InferenceHistory().get_base_model_keys()
+
+        self.time_stamp = None
+        self.model_class = None
+        self.model_category = None
+
+        # output inference parameters
+        for keys in self.base_model_keys:
+            setattr(self, keys, None)
+
+    def to_state_dict(self):
+
+        """ Writes selected model state parameters to dictionary. """
+
+        state_dict = {}
+        for keys in self.base_model_keys:
+            if hasattr(self,keys):
+                state_dict.update({keys: getattr(self,keys)})
+
+        return state_dict
+
+    def post_init(self):
+
+        """ Enables a post_init set of checks upon creation of the model. Currently, not implemented by
+        default, but can be configured to enable custom steps upon instantiation of any model in LLMWare. """
+
+        state_dict = self.to_state_dict()
+        model_post_init = LLMWareConfig().get_config("model_post_init")
+        post_init_module = model_post_init["module"]
+        post_init_class = model_post_init["class"]
+
+        module = importlib.import_module(post_init_module)
+        if hasattr(module, post_init_class):
+            post_init_exec = getattr(module, post_init_class)
+            success = post_init_exec(state_dict)
+
+        return True
+
+    def register(self):
+
+        """ Enables registration at completion of any model invocation - inference, function call, or embedding. """
+
+        self.time_stamp = Utilities().get_current_time_now()
+
+        state_dict = self.to_state_dict()
+        model_register = LLMWareConfig().get_config("model_register")
+        register_module = model_register["module"]
+        register_class = model_register["class"]
+
+        logging.debug(f"register module {register_module} - register class - {register_class}")
+
+        module = importlib.import_module(register_module)
+
+        if hasattr(module, register_class):
+            registration_exec = getattr(module, register_class)
+            success = registration_exec(state_dict)
+
+        return True
+
+
+class OpenChatModel(BaseModel):
 
     """ OpenChatModel class implements the OpenAI prompt API and is intended for use with OpenChat compatible
     inference servers """
 
-    def __init__(self, model_name=None,  model_card=None, context_window=4000,prompt_wrapper=None, api_key="not_used"):
+    def __init__(self, model_name=None,  model_card=None, context_window=4000,prompt_wrapper=None, api_key="not_used",
+                 **kwargs):
+
+        super().__init__()
 
         #   expected to take config parameters from model card
         self.api_key = api_key
         self.model_name = model_name
         self.model_card = model_card
+
+        self.model_class = "OpenChatModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         #   by default, will use the 'chat' open interface, but alternative is 'completion' api
         self.model_type = "chat"
@@ -2054,15 +2352,22 @@ class OpenChatModel:
         self.add_prompt_engineering = False
         self.add_context = ""
 
+        # new post_init check
+        self.post_init()
+
     def set_api_key (self, api_key, env_var="USER_MANAGED_OPEN_CHAT_API_KEY"):
+
+        """ Utility method to set API key if needed. """
 
         # set api_key
         os.environ[env_var] = api_key
-        logging.info("update: added and stored OpenChat api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored OpenChat api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key (self, env_var="USER_MANAGED_OPEN_CHAT_API_KEY"):
+
+        """ Utility method to get API key if needed. """
 
         #   not expected to use api_key - so may be empty - handled in inference separately
         self.api_key = os.environ.get(env_var)
@@ -2071,13 +2376,16 @@ class OpenChatModel:
 
     def token_counter(self, text_sample):
 
-        #   open ai recommends using the open source gpt2 tokenizer to count tokens
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
 
         return len(toks)
 
     def prompt_engineer_chat(self, query, context, inference_dict=None):
+
+        """ Creates Prompt Template for Chat Interaction. """
 
         if not self.add_prompt_engineering:
             if context:
@@ -2113,6 +2421,8 @@ class OpenChatModel:
 
     def prompt_engineer_completion (self, query, context, inference_dict=None):
 
+        """ Creates Prompt for 'Completion' style interface. """
+
         if not self.add_prompt_engineering:
             if context:
                 selected_prompt = "default_with_context"
@@ -2139,6 +2449,12 @@ class OpenChatModel:
 
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
+
+        """ Executes inference on the Model. Required input is a text prompt.  Optional parameters include
+        an 'add_context' to be used as a source in the prompt, and assembled according to the prompt
+        engineering style (e.g., add_prompt_engineering).  An optional inference_dict can include other optional
+        parameters such as temperature and max_tokens. If an API key is required, it can be passed here, or
+        will be picked up through the appropriate os.environ variable """
 
         if add_context:
             self.add_context = add_context
@@ -2272,19 +2588,39 @@ class OpenChatModel:
             usage = {"input":0, "output":0, "total":0, "metric": "tokens",
                      "processing_time": time.time() - time_start}
 
-            logging.error("error: Open Chat model inference produced error - %s ", e)
+            logger.error("error: Open Chat model inference produced error - %s ", e)
 
         output_response = {"llm_response": text_out, "usage": usage}
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
 
         return output_response
 
 
-class OllamaModel:
+class OllamaModel(BaseModel):
 
     """ OllamaModel class implements the Ollama model prompt API and is intended for use in building
      RAG pipelines while using a Ollama endpoint primarily for rapid local prototyping. """
 
-    def __init__(self, model_name=None,  model_card=None, context_window=4000,prompt_wrapper=None, api_key="not_used"):
+    def __init__(self, model_name=None,  model_card=None, context_window=4000,prompt_wrapper=None, api_key="not_used",
+                 **kwargs):
+
+        super().__init__()
+
+        self.model_class = "OllamaModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         # default ollama specific settings
         # self.uri = "http://localhost:11434/api/"
@@ -2345,22 +2681,29 @@ class OllamaModel:
         # self.uri = "http://localhost:11434/api/"
         self.uri = f"http://{self.host}:{self.port}/api/"
 
+        self.post_init()
+
     def set_api_key (self, api_key, env_var="USER_MANAGED_OLLAMA_API_KEY"):
+
+        """ Utility method to store api_key in os.environ variable. """
 
         # set api_key
         os.environ[env_var] = api_key
-        logging.info("update: added and stored Ollama api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored Ollama api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key (self, env_var="USER_MANAGED_OLLAMA_API_KEY"):
 
-        #   not expected to use api_key - so may be empty - handled in inference separately
+        """ Utility method to get api_key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
 
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Uses default GPT2 tokenizer for fast, approximate token count, if needed. """
 
         #   note: this is an approximation for counting the input tokens using a default tokenizer
         #   --to get 100% accurate, need to use the tokenizer being applied on the 'ollama' decoding
@@ -2371,6 +2714,8 @@ class OllamaModel:
         return len(toks)
 
     def prompt_engineer (self, query, context, inference_dict=None):
+
+        """ Builds prompt by assembling query, context and applying the selected prompt style. """
 
         #   by default, this will construct a very basic prompt, concatenating the
         #   query + context with a basic instruction
@@ -2404,7 +2749,7 @@ class OllamaModel:
 
         response = requests.get(self.uri+"tags")
 
-        logging.info("update: OllamaModel - discover_models - %s ", response.text)
+        logger.info("update: OllamaModel - discover_models - %s ", response.text)
 
         output = json.loads(response.text)
 
@@ -2452,7 +2797,7 @@ class OllamaModel:
                                          json={"model": self.model_name,
                                                "messages": messages, "stream": self.stream_mode})
 
-                logging.info("update: OllamaModel response - chat - %s ", response.text)
+                logger.info("update: OllamaModel response - chat - %s ", response.text)
 
                 output = json.loads(response.text)
 
@@ -2522,18 +2867,37 @@ class OllamaModel:
             usage = {"input":0, "output":0, "total":0, "metric": "tokens",
                      "processing_time": time.time() - time_start}
 
-            logging.error("error: Ollama model inference produced error - %s ", e)
+            logger.error("error: Ollama model inference produced error - %s ", e)
 
         output_response = {"llm_response": text_out, "usage": usage}
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
 
         return output_response
 
 
-class OpenAIGenModel:
+class OpenAIGenModel(BaseModel):
 
     """ OpenAIGenModel class implements the OpenAI API for its generative decoder models. """
 
-    def __init__(self, model_name=None, api_key=None, context_window=4000, max_output=100,temperature=0.7):
+    def __init__(self, model_name=None, api_key=None, context_window=4000, max_output=100,temperature=0.7, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "OpenAIGenModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
         self.model_name = model_name
@@ -2548,37 +2912,50 @@ class OpenAIGenModel:
         self.llm_max_output_len = int(context_window * 0.5)
 
         # inference settings
-        self.temperature = temperature
+        if temperature >= 0.0:
+            self.temperature = temperature
+        else:
+            self.temperature = 0.7
+
         self.target_requested_output_tokens = max_output
         self.add_prompt_engineering = False
         self.add_context = ""
 
+        self.post_init()
+
     def set_api_key (self, api_key, env_var="USER_MANAGED_OPENAI_API_KEY"):
+
+        """ Utility method to set the API key in os.environ variable. """
 
         # set api_key
         os.environ[env_var] = api_key
-        logging.info("update: added and stored OpenAI api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored OpenAI api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key (self, env_var="USER_MANAGED_OPENAI_API_KEY"):
 
+        """ Utility method to get the API key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
 
         if not self.api_key:
-            logging.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
+            logger.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
 
         return self.api_key
 
     def token_counter(self, text_sample):
 
-        #   open ai recommends using the open source gpt2 tokenizer to count tokens
+        """ Fast, approximate token counting using GPT2 tokenizer. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
 
         return len(toks)
 
     def prompt_engineer_chatgpt3(self, query, context, inference_dict=None):
+
+        """ Builds prompt in ChatGPT format.  """
 
         if not self.add_prompt_engineering:
             if context:
@@ -2608,6 +2985,8 @@ class OpenAIGenModel:
 
     def prompt_engineer (self, query, context, inference_dict=None):
 
+        """ Builds Prompt in traditional 'completion' style. """
+
         if not self.add_prompt_engineering:
             if context:
                 selected_prompt = "default_with_context"
@@ -2628,6 +3007,11 @@ class OpenAIGenModel:
 
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
+
+        """ Executes inference on OpenAI Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
 
         if add_context:
             self.add_context = add_context
@@ -2654,7 +3038,7 @@ class OpenAIGenModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking OpenAI Generative model with no api_key")
+            logger.error("error: invoking OpenAI Generative model with no api_key")
 
         # default case - pass the prompt received without change
         prompt_enriched = prompt
@@ -2673,7 +3057,7 @@ class OpenAIGenModel:
         try:
 
             if self.model_name in ["gpt-3.5-turbo","gpt-4","gpt-4-1106-preview","gpt-3.5-turbo-1106", 
-                                   "gpt-4-0125-preview", "gpt-3.5-turbo-0125"]:
+                                   "gpt-4-0125-preview", "gpt-3.5-turbo-0125", "gpt-4o", "gpt-4o-2024-05-13"]:
 
                 messages = self.prompt_engineer_chatgpt3(prompt_enriched, self.add_context, inference_dict)
 
@@ -2686,7 +3070,7 @@ class OpenAIGenModel:
 
                 else:
 
-                    logging.info("update: applying custom OpenAI client from OpenAIConfig")
+                    logger.info("update: applying custom OpenAI client from OpenAIConfig")
 
                     client = azure_client
 
@@ -2717,7 +3101,7 @@ class OpenAIGenModel:
 
                 else:
 
-                    logging.info("update: applying custom OpenAI client from OpenAIConfig")
+                    logger.info("update: applying custom OpenAI client from OpenAIConfig")
 
                     client = azure_client
 
@@ -2739,19 +3123,37 @@ class OpenAIGenModel:
             usage = {"input":0, "output":0, "total":0, "metric": "tokens",
                      "processing_time": time.time() - time_start}
 
-            # raise LLMInferenceResponseException(e)
-            logging.error("error: OpenAI model inference produced error - %s ", e)
+            logger.error("error: OpenAI model inference produced error - %s ", e)
 
         output_response = {"llm_response": text_out, "usage": usage}
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
 
         return output_response
 
 
-class ClaudeModel:
+class ClaudeModel(BaseModel):
 
     """ ClaudeModel class implements the Anthropic Claude API for calling Anthropic models. """
 
-    def __init__(self, model_name=None, api_key=None, context_window=8000, max_output=100, temperature=0.7):
+    def __init__(self, model_name=None, api_key=None, context_window=8000, max_output=100, temperature=0.7, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "ClaudeModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
         self.model_name = model_name
@@ -2766,35 +3168,48 @@ class ClaudeModel:
         self.llm_max_output_len = int(context_window * 0.5)
 
         # inference settings
-        self.temperature = temperature
+        if temperature >= 0.0:
+            self.temperature = temperature
+        else:
+            self.temperature = 0.7
+
         self.target_requested_output_tokens = max_output
         self.add_prompt_engineering = False
         self.add_context = ""
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_ANTHROPIC_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored ANTHROPIC api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored ANTHROPIC api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_ANTHROPIC_API_KEY"):
 
+        """ Utility method to get api_key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
 
         if not self.api_key:
-            logging.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
+            logger.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
 
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
 
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
         return len(toks)
 
     def prompt_engineer (self, query, context, inference_dict=None):
+
+        """ Builds prompt by assembling query, context and applying prompt style. """
 
         # default case -> prompt = input query
 
@@ -2828,6 +3243,11 @@ class ClaudeModel:
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
 
+        """ Executes inference on Anthropic Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
+
         if add_context:
             self.add_context = add_context
 
@@ -2849,7 +3269,7 @@ class ClaudeModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking Anthropic Claude Generative model with no api_key")
+            logger.error("error: invoking Anthropic Claude Generative model with no api_key")
 
         try:
             import anthropic
@@ -2909,21 +3329,40 @@ class ClaudeModel:
                      "processing_time": time.time() - time_start}
 
             # raise LLMInferenceResponseException(e)
-            logging.error("error: Anthropic model inference produced error - %s ", e)
+            logger.error("error: Anthropic model inference produced error - %s ", e)
 
         output_response = {"llm_response": text_out, "usage": usage}
 
-        logging.debug(f"update: output_response - anthropic: {output_response}")
-     
+        logger.debug(f"update: output_response - anthropic: {output_response}")
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
+
         return output_response
 
 
-class GoogleGenModel:
+class GoogleGenModel(BaseModel):
 
     """ GoogleGenModel class implements the Google Vertex API for Google's generative models.
     Note: to use GoogleModels does require a separate import of Google SDKs - vertexai and google.cloud.platform """
 
-    def __init__(self, model_name=None, api_key=None, context_window=8192, max_output=100, temperature=0.7):
+    def __init__(self, model_name=None, api_key=None, context_window=8192, max_output=100, temperature=0.7, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "GoogleGenModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
         self.model_name = model_name
@@ -2940,25 +3379,36 @@ class GoogleGenModel:
         self.llm_max_output_len = 1024
 
         # inference settings
-        self.temperature = temperature
+        if temperature >= 0.0:
+            self.temperature = temperature
+        else:
+            self.temperature = 0.7
+
         self.target_requested_output_tokens = max_output
         self.add_prompt_engineering = False
         self.add_context = ""
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_GOOGLE_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored GOOGLE api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored GOOGLE api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_GOOGLE_API_KEY"):
 
+        """ Utility method to get api_key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
 
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
@@ -2966,6 +3416,8 @@ class GoogleGenModel:
         return len(toks)
 
     def prompt_engineer (self, query, context, inference_dict=None):
+
+        """ Builds Prompt by assembling query, context and applying the selected prompt engineering style. """
 
         if not self.add_prompt_engineering:
             if context:
@@ -2993,7 +3445,12 @@ class GoogleGenModel:
 
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
- 
+
+        """ Executes inference on Google Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
+
         if add_context:
             self.add_context = add_context
 
@@ -3023,7 +3480,7 @@ class GoogleGenModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking Google Generative model with no api_key")
+            logger.error("error: invoking Google Generative model with no api_key")
 
         prompt_enriched = self.prompt_engineer(prompt,self.add_context, inference_dict=inference_dict)
 
@@ -3045,7 +3502,7 @@ class GoogleGenModel:
             response = self.model.predict(prompt=prompt_enriched,
                                           temperature=0.7)
 
-            logging.debug(f"google model response: {response.text}")
+            logger.debug(f"google model response: {response.text}")
          
             text_out = response.text
 
@@ -3063,7 +3520,7 @@ class GoogleGenModel:
                      "processing_time": time.time() - time_start}
 
             # raise LLMInferenceResponseException(e)
-            logging.error("error: Google model inference produced error:  %s", e)
+            logger.error("error: Google model inference produced error:  %s", e)
 
         finally:
             # Close the credentials json which automatically deletes it (since it is a NamedTemporaryFile)
@@ -3071,7 +3528,16 @@ class GoogleGenModel:
         
         output_response = {"llm_response": text_out, "usage": usage}
 
-        logging.debug("update: output_response - google: %s ", output_response)
+        logger.debug("update: output_response - google: %s ", output_response)
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
 
         return output_response
     
@@ -3089,11 +3555,21 @@ class GoogleGenModel:
         return temp_json_path
 
 
-class JurassicModel:
+class JurassicModel(BaseModel):
 
     """ JurassicModel class implements the AI21 Jurassic API. """
 
-    def __init__(self, model_name=None, api_key=None, context_window=2048, max_output=100,temperature=0.7):
+    def __init__(self, model_name=None, api_key=None, context_window=2048, max_output=100,temperature=0.7, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "JurassicModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
         self.model_name = model_name
@@ -3109,26 +3585,39 @@ class JurassicModel:
         self.llm_max_output_len = int(context_window * 0.5)
 
         # inference settings
-        self.temperature = temperature
+        if temperature >= 0.0:
+            self.temperature = temperature
+        else:
+            self.temperature = 0.7
+
         self.target_requested_output_tokens = max_output
         self.add_prompt_engineering = False
         self.add_context = ""
 
         # 'j2-jumbo-instruct', 'j2-grande-instruct','j2-jumbo','j2-grande', 'j2-large'
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_AI21_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored AI21 api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored AI21 api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_AI21_API_KEY"):
+
+        """ Utility method to get api_key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
+
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
 
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
@@ -3136,6 +3625,8 @@ class JurassicModel:
         return len(toks)
 
     def prompt_engineer (self, query, context, inference_dict=None):
+
+        """ Builds prompt by assembling query, context and applying the selected prompt style. """
 
         if not self.add_prompt_engineering:
             if context:
@@ -3166,6 +3657,11 @@ class JurassicModel:
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
 
+        """ Executes inference on Jurassic Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
+
         if add_context:
             self.add_context = add_context
 
@@ -3187,7 +3683,7 @@ class JurassicModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking AI21 Jurassic model with no api_key")
+            logger.error("error: invoking AI21 Jurassic model with no api_key")
 
         try:
             import ai21
@@ -3237,20 +3733,39 @@ class JurassicModel:
                      "processing_time": time.time() - time_start}
 
             # raise LLMInferenceResponseException(e)
-            logging.error("error: Jurassic model inference produced error - %s ", e)
+            logger.error("error: Jurassic model inference produced error - %s ", e)
 
         # will look to capture usage metadata
 
         output_response = {"llm_response": text_out, "usage": usage}
 
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
+
         return output_response
 
 
-class CohereGenModel:
+class CohereGenModel(BaseModel):
 
     """ CohereGenModel class implements the API for Cohere's generative models. """
 
-    def __init__(self, model_name=None, api_key=None, context_window=2048, max_output=100,temperature=0.7):
+    def __init__(self, model_name=None, api_key=None, context_window=2048, max_output=100,temperature=0.7, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "CohereGenModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
         self.model_name = model_name
@@ -3267,7 +3782,11 @@ class CohereGenModel:
         self.llm_max_output_len = int(context_window * 0.5)
 
         # inference settings
-        self.temperature = temperature
+        if temperature >= 0.0:
+            self.temperature = temperature
+        else:
+            self.temperature = 0.7
+
         self.target_requested_output_tokens = max_output
         self.add_prompt_engineering = False
         self.add_context = ""
@@ -3275,15 +3794,20 @@ class CohereGenModel:
         # cohere generative models - 'command-medium-nightly',
         # 'command-xlarge-nightly','xlarge','medium', "summarize-xlarge", "summarize-medium"
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_COHERE_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored COHERE api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored COHERE api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_COHERE_API_KEY"):
+
+        """ Utility method to get api_key from os.environ variable. """
 
         self.api_key = os.environ.get(env_var)
 
@@ -3291,12 +3815,16 @@ class CohereGenModel:
 
     def token_counter(self, text_sample):
 
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
 
         return len(toks)
 
     def prompt_engineer (self, query, context, inference_dict=None):
+
+        """ Builds prompt by assembling query, context and applying the selected prompt style. """
 
         # Cohere prompt prototype - very simple - uses " -- " as separators - does not like " " at the end
 
@@ -3329,6 +3857,11 @@ class CohereGenModel:
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
 
+        """ Executes inference on Cohere Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
+
         if add_context:
             self.add_context = add_context
 
@@ -3348,7 +3881,7 @@ class CohereGenModel:
 
         prompt_enriched = prompt
 
-        logging.debug("update: in cohere model inference: %s - %s", prompt_enriched, self.add_prompt_engineering)
+        logger.debug("update: in cohere model inference: %s - %s", prompt_enriched, self.add_prompt_engineering)
 
         prompt_enriched = self.prompt_engineer(prompt_enriched,self.add_context, inference_dict=inference_dict)
 
@@ -3359,7 +3892,7 @@ class CohereGenModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking Cohere Generative model with no api_key")
+            logger.error("error: invoking Cohere Generative model with no api_key")
 
         try:
             import cohere
@@ -3402,183 +3935,41 @@ class CohereGenModel:
             usage = {"input": 0, "output": 0, "total": 0, "metric": "chars",
                      "processing_time": time.time() - time_start}
 
-            logging.error("error: Cohere model inference produced error - %s - ", e)
+            logger.error("error: Cohere model inference produced error - %s - ", e)
 
         # will look to capture usage metadata
 
         output_response = {"llm_response": text_out, "usage": usage}
 
-        logging.debug("update:  output response - cohere : %s ", output_response)
+        logger.debug("update:  output response - cohere : %s ", output_response)
+
+        # output inference parameters
+        self.llm_response = text_out
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
 
         return output_response
 
 
-class AIBReadGPTModel:
-
-    """ AIBReadGPT implements the AIB Bloks API for the READ GPT model. """
-
-    def __init__(self, model_name=None, api_key=None, context_window=2048):
-
-        self.api_key = api_key
-
-        self.model_name = model_name
-        self.model = None
-        self.tokenizer = None
-
-        self.error_message = "\nUnable to connect to AIB READ GPT API. Please try again later."
-
-        #   set max_total_len -> adjust input and output based on use case
-        self.max_total_len = context_window
-        self.max_input_len = int(0.4 * context_window)
-        self.llm_max_output_len = int(0.4 * context_window)
-
-        self.separator = "\n"
-
-        # inference settings
-        self.temperature = 0.2
-        self.target_requested_output_tokens = 200
-        self.add_prompt_engineering = True
-        self.add_context = ""
-
-    def set_api_key(self, api_key, env_var="USER_MANAGED_READ_GPT_API_KEY"):
-
-        # set api_key
-        os.environ[env_var] = api_key
-        logging.info("update: added and stored READ_GPT api_key in environmental variable- %s", env_var)
-
-        return self
-
-    def _get_api_key(self, env_var="USER_MANAGED_READ_GPT_API_KEY"):
-
-        self.api_key = os.environ.get(env_var)
-
-        return self.api_key
-
-    def token_counter(self, text_sample):
-
-        tokenizer = Utilities().get_default_tokenizer()
-        toks = tokenizer.encode(text_sample).ids
-        return len(toks)
-
-    # very simple prompt construction used for now -> will likely evolve over time
-    def prompt_engineer(self, query, context, inference_dict=None):
-
-        if not query:
-            query = "What is a list that summarizes the key points?"
-
-        # default_case
-        prompt_engineered = context + "\n" + query
-
-        if self.add_prompt_engineering == "top_level_summary_select":
-            prompt_engineered += query + "\n"
-            prompt_engineered += "Which of the following selections best answers the question?"
-            prompt_engineered += context
-
-        if self.add_prompt_engineering == "summarize_with_bullets_no_query":
-            issue = "What is a list of the most important points?"
-            prompt_engineered = context + "\n" + issue
-
-        return prompt_engineered
-
-    def load_model_for_inference(self, model_name=None, model_card=None, fp=None):
-        # look up model_name in configs
-        if model_name:
-            self.model_name = model_name
-        return self
-
-    def load_pretrained_model(self, model_name=None):
-        if model_name:
-            self.model_name = model_name
-        # convenience method for pretrained models as a single step
-        return self
-
-    def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
-                  api_key=None):
-
-        if add_context:
-            self.add_context = add_context
-
-        if add_prompt_engineering:
-            self.add_prompt_engineering = add_prompt_engineering
-
-        if inference_dict:
-
-            if "temperature" in inference_dict:
-                self.temperature = inference_dict["temperature"]
-
-            if "max_tokens" in inference_dict:
-                self.target_requested_output_tokens = inference_dict["max_tokens"]
-
-        prompt_enriched = self.prompt_engineer(prompt, self.add_context, inference_dict=inference_dict)
-
-        # safety check on length - set cap with small 'buffer'
-        input_tokens = self.token_counter(prompt_enriched)
-        buffer = 10
-        available_tokens_in_output_context_window = self.max_total_len - input_tokens - buffer
-        # if target requested output is less, then keep - otherwise, cap with 'safe' maximum len
-        target_len = min(self.target_requested_output_tokens, available_tokens_in_output_context_window)
-
-        output_dict_new = {}
-        output_response = {}
-        usage = {"input": input_tokens}
-
-        if api_key:
-            self.api_key = api_key
-
-        if not self.api_key:
-            self.api_key = self._get_api_key()
-
-        params = {"prompt": prompt_enriched, "max_output_tokens": target_len, "api_key": self.api_key}
-
-        time_start = time.time()
-
-        try:
-            # linked to TEST SERVER
-            output = requests.post(os.environ.get("AIB_READ_GPT_URI"), data=params)
-            output_dict_new = ast.literal_eval(output.text)
-            success_path = 1
-
-        except:
-
-            text_output = "/***ERROR***/"
-            usage = {"input": 0, "output": 0, "total": 0, "metric": "tokens",
-                     "processing_time": time.time() - time_start}
-
-            logging.error("error: no response from aib remote server for aib-read-gpt model - "
-                          "check api key and connection")
-
-            success_path = -1
-            output_response = {"llm_response": "", "usage": usage}
-
-        # quick postprocessing
-
-        if success_path == 1:
-
-            for keys, values in output_dict_new.items():
-                if keys.startswith("response_"):
-                    response = output_dict_new[keys]
-
-                    output_len = self.token_counter(response)
-                    usage.update({"output": output_len})
-                    usage.update({"total": usage["input"] + output_len})
-                    usage.update({"metric": "tokens"})
-                    usage.update({"processing_time": time.time() - time_start})
-
-                    output_response = {"llm_response": response, "usage": usage}
-
-                    logging.debug("update: output_response - aib-read-gpt - %s", output_response)
-
-                if keys == "message":
-                    logging.error("error - output not received from model")
-
-        return output_response
-
-
-class LLMWareModel:
+class LLMWareModel(BaseModel):
 
     """LLMWareModel class implements the API for LLMWare generative models. """
 
-    def __init__(self, model_name=None, api_key=None, context_window=2048):
+    def __init__(self, model_name=None, api_key=None, context_window=2048, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "LLMWareModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         self.api_key = api_key
 
@@ -3601,15 +3992,20 @@ class LLMWareModel:
         self.add_prompt_engineering = True
         self.add_context = ""
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_LLMWARE_GPT_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored READ_GPT api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored READ_GPT api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_LLMWARE_GPT_API_KEY"):
+
+        """ Utility method to get api_key from os.environ variable. """
 
         self.api_key = os.environ.get(env_var)
 
@@ -3617,12 +4013,15 @@ class LLMWareModel:
 
     def token_counter(self, text_sample):
 
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
         return len(toks)
 
-    # very simple prompt construction used for now -> will likely evolve over time
     def prompt_engineer(self, query, context, inference_dict=None):
+
+        """ Builds prompt by assembling query, context and applying the selected prompt style. """
 
         if not query:
             query = "What is a list that summarizes the key points?"
@@ -3655,6 +4054,11 @@ class LLMWareModel:
 
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, inference_dict=None,
                   api_key=None):
+
+        """ Executes inference on LLMWare Model.  Only required input is text-based prompt, with optional
+        parameters to "add_context" passage that will be assembled using the prompt style in the
+        "add_prompt_engineering" parameter.  Optional inference_dict for temperature and max_tokens configuration,
+        and optional passing of api_key at time of inference. """
 
         if add_context:
             self.add_context = add_context
@@ -3711,20 +4115,34 @@ class LLMWareModel:
             usage = {"input": 0, "output": 0, "total": 0, "metric": "tokens",
                      "processing_time": time.time() - time_start}
 
-            logging.error("error: no response from aib remote server for llmware-gpt model - "
+            logger.error("error: no response from aib remote server for llmware-gpt model - "
                           "check api key and connection")
 
             success_path = -1
             output_response = {"llm_response": "", "usage": usage}
 
+        # output inference parameters
+        self.llm_response = ""
+        self.usage = usage
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = prompt_enriched
+
+        self.register()
+
         return output_response
 
 
-class OpenAIEmbeddingModel:
+class OpenAIEmbeddingModel(BaseModel):
 
     """ OpenAIEmbeddingModel class implements the OpenAI API for embedding models. """
 
-    def __init__(self, model_name=None, api_key=None, embedding_dims=None, model_card=None, max_len=None):
+    def __init__(self, model_name=None, api_key=None, embedding_dims=None, model_card=None, max_len=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "OpenAIEmbeddingModel"
+        self.model_category = "embedding"
 
         # must have elements for embedding model
         self.model_name = model_name
@@ -3754,15 +4172,20 @@ class OpenAIEmbeddingModel:
             if max_len < self.max_total_len:
                 self.max_len = max_len
 
+        self.post_init()
+
     def set_api_key(self, api_key,env_var="USER_MANAGED_OPENAI_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored OpenAI api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored OpenAI api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_OPENAI_API_KEY"):
+
+        """ Utility method to get api_key from os.environ variable. """
 
         self.api_key = os.environ.get(env_var)
         return self.api_key
@@ -3772,6 +4195,9 @@ class OpenAIEmbeddingModel:
         return self.tokenizer
 
     def token_counter(self, text_sample):
+
+        """ Counts tokens in text sample. """
+
         return len(self.tokenizer.encode(text_sample).ids)
 
     def embedding(self, text_sample, api_key=None):
@@ -3783,7 +4209,7 @@ class OpenAIEmbeddingModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking OpenAI Embedding model with no api_key")
+            logger.error("error: invoking OpenAI Embedding model with no api_key")
 
         # need to prepare for batches
         if isinstance(text_sample, list):
@@ -3822,7 +4248,7 @@ class OpenAIEmbeddingModel:
                 else:
                     display_sample = sample
 
-                logging.warning(f"warning: OpenAI Embedding - input sample len - {tok_len} > context_window size "
+                logger.warning(f"warning: OpenAI Embedding - input sample len - {tok_len} > context_window size "
                                 f"\ninput_sample - {display_sample} "
                                 f"\n\nSample is being truncated.")
 
@@ -3843,7 +4269,7 @@ class OpenAIEmbeddingModel:
 
         else:
 
-            logging.info("update: applying custom OpenAI client from OpenAIConfig")
+            logger.info("update: applying custom OpenAI client from OpenAIConfig")
 
             client = azure_client
 
@@ -3856,14 +4282,21 @@ class OpenAIEmbeddingModel:
             for i, entries in enumerate(response.data):
                 embedding.append(response.data[i].embedding)
 
+        self.register()
+
         return embedding
 
 
-class CohereEmbeddingModel:
+class CohereEmbeddingModel(BaseModel):
 
     """ CohereEmbeddingModel implements the Cohere API for embedding models. """
 
-    def __init__(self, model_name = None, api_key=None, embedding_dims=None, model_card=None,max_len=None):
+    def __init__(self, model_name = None, api_key=None, embedding_dims=None, model_card=None,max_len=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "CohereEmbeddingModel"
+        self.model_category = "embedding"
 
         self.api_key = api_key
         self.model_name = model_name
@@ -3882,21 +4315,29 @@ class CohereEmbeddingModel:
             if max_len < self.max_total_len:
                 self.max_len = max_len
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_COHERE_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored COHERE api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored COHERE api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_COHERE_API_KEY"):
+
+        """ Utility method to get api_key from os.environ variable. """
 
         self.api_key = os.environ.get(env_var)
 
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
         return len(toks)
@@ -3907,7 +4348,7 @@ class CohereEmbeddingModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking Cohere embedding model with no api_key")
+            logger.error("error: invoking Cohere embedding model with no api_key")
 
         try:
             import cohere
@@ -3932,22 +4373,29 @@ class CohereEmbeddingModel:
         output = []
         for i, emb in enumerate(response.embeddings):
 
-            logging.debug("update: embedding - %s - %s ", i, emb)
+            logger.debug("update: embedding - %s - %s ", i, emb)
 
             # normalization of the Cohere embedding vector improves performance
             emb_vec = np.array(emb) / np.linalg.norm(emb)
 
             output.append(emb_vec)
 
+        self.register()
+
         return output
 
 
-class GoogleEmbeddingModel:
+class GoogleEmbeddingModel(BaseModel):
 
     """ GoogleEmbeddingModel implements the Google API for text embedding models.  Note: to use Google models
     requires a separate install of the Google SDKs, e.g., vertexai and google.cloud.platform """
 
-    def __init__(self, model_name=None, api_key=None, embedding_dims=None, model_card=None, max_len=None):
+    def __init__(self, model_name=None, api_key=None, embedding_dims=None, model_card=None, max_len=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "GoogleEmbeddingModel"
+        self.model_category = "embedding"
 
         self.api_key = api_key
         self.model_name = model_name
@@ -3969,25 +4417,35 @@ class GoogleEmbeddingModel:
             if max_len < self.max_total_len:
                 self.max_len = max_len
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_GOOGLE_API_KEY"):
 
-        # set api_key
+        """ Utility method to set the API key in os.environ variable. """
+
         os.environ[env_var] = api_key
-        logging.info("update: added and stored GOOGLE api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored GOOGLE api_key in environmental variable- %s", env_var)
 
         return self
 
     def _get_api_key(self, env_var="USER_MANAGED_GOOGLE_API_KEY"):
 
+        """ Utility method to get api_key from os.environ variable. """
+
         self.api_key = os.environ.get(env_var)
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Gets GPT2 tokenizer for fast approximate token counting. """
+
         tokenizer = Utilities().get_default_tokenizer()
         toks = tokenizer.encode(text_sample).ids
         return len(toks)
 
     def embedding(self,text_sample, api_key= None):
+
+        """ Executes Embedding inference on Model. """
 
         if api_key:
             self.api_key = api_key
@@ -3996,7 +4454,7 @@ class GoogleEmbeddingModel:
             self.api_key = self._get_api_key()
 
         if not self.api_key:
-            logging.error("error: invoking Google Embedding model with no api_key")
+            logger.error("error: invoking Google Embedding model with no api_key")
 
         # Important: Before calling the model, we need to ensure the contents of the api_key
         # (the json dict string) have been persisted to a file
@@ -4036,7 +4494,7 @@ class GoogleEmbeddingModel:
                 new_batch = text_list[x*google_max_samples_per_inference:
                                       min((x+1)*google_max_samples_per_inference, len(text_list))]
 
-                logging.debug("update: new batch - %s - %s ", x, len(new_batch))
+                logger.debug("update: new batch - %s - %s ", x, len(new_batch))
 
                 embeddings_from_google = model.get_embeddings(new_batch)
 
@@ -4045,10 +4503,12 @@ class GoogleEmbeddingModel:
 
         except Exception as e:
             # raise LLMInferenceResponseException(e)
-            logging.error("error: Google model inference produced error - %s ", e)
+            logger.error("error: Google model inference produced error - %s ", e)
 
         finally:
             os.remove(google_json_credentials)
+
+        self.register()
 
         return embeddings_output
 
@@ -4064,12 +4524,17 @@ class GoogleEmbeddingModel:
         return temp_json_path
 
 
-class HFEmbeddingModel:
+class HFEmbeddingModel(BaseModel):
 
     """HFEmbeddingModel class implements the API for HuggingFace embedding models. """
 
     def __init__(self, model=None, tokenizer=None, model_name=None, api_key=None, model_card=None,
-                 embedding_dims=None, trust_remote_code=False, use_gpu_if_available=True, max_len=None):
+                 embedding_dims=None, trust_remote_code=False, use_gpu_if_available=True, max_len=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "HFEmbeddingModel"
+        self.model_category = "embedding"
 
         # pull in expected hf input
         self.model_name = model_name
@@ -4092,6 +4557,25 @@ class HFEmbeddingModel:
             if "context_window" in self.model_card:
                 self.context_window = self.model_card["context_window"]
 
+        # insert dynamic pytorch load here
+        global GLOBAL_TORCH_IMPORT
+        if not GLOBAL_TORCH_IMPORT:
+
+            logger.debug("update: ModelCatalog - HFEmbeddingModel - local dynamic load of torch here")
+            if util.find_spec("torch"):
+
+                try:
+                    global torch
+                    torch = importlib.import_module("torch")
+                    GLOBAL_TORCH_IMPORT = True
+                except:
+                    raise LLMWareException(message="Exception: could not load torch module.")
+
+            else:
+                raise LLMWareException(message="Exception: need to import torch to use this class.")
+
+        # end dynamic import here
+
         if self.model_name and not model:
 
             # pull from HF
@@ -4109,7 +4593,7 @@ class HFEmbeddingModel:
             self.model=pt_loader.get_embedding_model(hf_repo_name)
             self.tokenizer=pt_loader.get_tokenizer(hf_repo_name)
 
-        self.use_gpu = cuda.is_available() and use_gpu_if_available
+        self.use_gpu = torch.cuda.is_available() and use_gpu_if_available
 
         if self.model:
 
@@ -4159,12 +4643,14 @@ class HFEmbeddingModel:
             if max_len < self.context_window:
                 self.max_len = max_len
 
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_HF_API_KEY"):
 
         """ Sets the API key - generally not needed for public HF repositories. """
 
         os.environ[env_var] = api_key
-        logging.info("update: added and stored HF api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored HF api_key in environmental variable- %s", env_var)
 
         return self
 
@@ -4175,17 +4661,21 @@ class HFEmbeddingModel:
         self.api_key = os.environ.get(env_var)
 
         if not self.api_key:
-            logging.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
+            logger.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
 
         return self.api_key
 
     def token_counter(self, text_sample):
+
+        """ Counts tokens in text sample. """
+
         #   need to support HF tokenizer
         toks = self.tokenizer.encode(text_sample).ids
         return len(toks)
 
-    @no_grad()
     def embedding (self, text_sample, api_key=None):
+
+        """ Executes embedding inference. """
 
         # return embeddings only
         if isinstance(text_sample,list):
@@ -4203,22 +4693,26 @@ class HFEmbeddingModel:
             input_ids = model_inputs.input_ids.to('cpu')
             attn_mask = model_inputs.attention_mask.to('cpu')
 
-        model_outputs = self.model(input_ids, attention_mask=attn_mask)
+        #   context manager to run inference without saving/calculating grads
+        with torch.no_grad():
+            model_outputs = self.model(input_ids, attention_mask=attn_mask)
 
         embedding = model_outputs.last_hidden_state[:,0]
 
         # normalize hf embeddings
-        embeddings_normalized = nn.functional.normalize(embedding, p=2, dim=1)
+        embeddings_normalized = torch.nn.functional.normalize(embedding, p=2, dim=1)
 
         if self.use_gpu:
             embeddings_normalized = np.array(embeddings_normalized.detach().to('cpu'))
         else:
             embeddings_normalized = embeddings_normalized.detach().numpy()
 
+        self.register()
+
         return embeddings_normalized
 
 
-class HFGenerativeModel:
+class HFGenerativeModel(BaseModel):
 
     """ HFGenerativeModel class implements the HuggingFace generative model API, and is used generally for
      models in HuggingFace repositories, e.g., Dragon, Bling, etc. """
@@ -4230,7 +4724,17 @@ class HFGenerativeModel:
     def __init__(self, model=None, tokenizer=None, model_name=None, api_key=None, model_card=None,
                  prompt_wrapper=None, instruction_following=False, context_window=2048,
                  use_gpu_if_available=True, trust_remote_code=True, sample=True,max_output=100, temperature=0.3,
-                 get_logits=False):
+                 get_logits=False, api_endpoint=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "HFGenerativeModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.final_prompt = None
 
         #   pull in expected hf input
         self.model_name = model_name
@@ -4263,8 +4767,27 @@ class HFGenerativeModel:
             if "function_call" in model_card:
                 self.fc_supported = model_card["function_call"]
 
+        # insert dynamic pytorch load here
+        if not api_endpoint:
+
+            global GLOBAL_TORCH_IMPORT
+            if not GLOBAL_TORCH_IMPORT:
+                if util.find_spec("torch"):
+
+                    try:
+                        global torch
+                        torch = importlib.import_module("torch")
+                        GLOBAL_TORCH_IMPORT = True
+                    except:
+                        raise LLMWareException(message="Exception: could not load torch module.")
+
+                else:
+                    raise LLMWareException(message="Exception: need to import torch to use this class.")
+
+        # end dynamic import here
+
         # instantiate if model_name passed without actual model and tokenizer
-        if model_name and not model and not tokenizer:
+        if model_name and not model and not tokenizer and not api_endpoint:
 
             hf_repo_name = self.model_name
 
@@ -4333,7 +4856,10 @@ class HFGenerativeModel:
 
         #   will load model and inference onto gpu,
         #   if (a) CUDA available and (b) use_gpu_if_available set to True (default)
-        self.use_gpu = cuda.is_available() and use_gpu_if_available
+        if not api_endpoint:
+            self.use_gpu = torch.cuda.is_available() and use_gpu_if_available
+        else:
+            self.use_gpu = False
 
         if self.model:
 
@@ -4370,10 +4896,11 @@ class HFGenerativeModel:
 
             if self.use_gpu:
                 self.model.to('cuda')
-                logging.debug("update: HFGenerative loading - moving model to cuda")
+                logger.debug("update: HFGenerative loading - moving model to cuda")
 
         else:
-            logging.error("error: HFGenerativeModel - could not identify model  - ", model_name)
+            if not api_endpoint:
+                logger.error("error: HFGenerativeModel - could not identify model  - ", model_name)
 
         # no api key expected or required
         self.api_key = api_key
@@ -4395,12 +4922,16 @@ class HFGenerativeModel:
         self.add_prompt_engineering = False
         self.add_context = ""
 
+        self.api_endpoint = api_endpoint
+
+        self.post_init()
+
     def set_api_key(self, api_key, env_var="USER_MANAGED_HF_API_KEY"):
 
         """ Sets the API key - generally not needed for public HF repositories. """
 
         os.environ[env_var] = api_key
-        logging.info("update: added and stored HF api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored HF api_key in environmental variable- %s", env_var)
 
         return self
 
@@ -4411,7 +4942,7 @@ class HFGenerativeModel:
         self.api_key = os.environ.get(env_var)
 
         if not self.api_key:
-            logging.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
+            logger.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
 
         return self.api_key
 
@@ -4479,7 +5010,6 @@ class HFGenerativeModel:
 
         return prompt_engineered
 
-    @no_grad()
     def inference(self, prompt, add_context=None, add_prompt_engineering=None, api_key=None,
                   inference_dict=None):
 
@@ -4505,7 +5035,7 @@ class HFGenerativeModel:
 
         #   show warning if function calling model
         if self.fc_supported:
-            logging.warning("warning: this is a function calling model - using .inference may lead to unexpected "
+            logger.warning("warning: this is a function calling model - using .inference may lead to unexpected "
                             "results.   Recommended to use the .function_call method to ensure correct prompt "
                             "template packaging.")
 
@@ -4516,6 +5046,12 @@ class HFGenerativeModel:
 
             if "max_tokens" in inference_dict:
                 self.target_requested_output_tokens = inference_dict["max_tokens"]
+
+        #   START - route to api endpoint
+        if self.api_endpoint:
+            return self.inference_over_api_endpoint(prompt, context=self.add_context,
+                                                    inference_dict=inference_dict)
+        #   END - route to api endpoint
 
         text_prompt = prompt
 
@@ -4537,7 +5073,7 @@ class HFGenerativeModel:
 
         tokenizer_output = self.tokenizer.encode(text_prompt)
         input_token_len = len(tokenizer_output)
-        input_ids = tensor(tokenizer_output).unsqueeze(0)
+        input_ids = torch.tensor(tokenizer_output).unsqueeze(0)
 
         #   explicit check and setting to facilitate debugging
         if self.use_gpu:
@@ -4561,16 +5097,16 @@ class HFGenerativeModel:
         eos_token_id = [self.eos_token_id]
         # eos_token_id = [0]
 
-        eos_token_id_tensor = tensor(eos_token_id).to(input_ids.device)
+        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device)
 
         # keep track of which sequences are already finished
-        unfinished_sequences = ones(input_ids.shape[0], dtype=long, device=input_ids.device)
+        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
         this_peer_finished = False  # used by synced_gpus only
         # auto-regressive generation
         new_tokens_generated = 0
 
-        attn_mask = ones(input_ids.shape[1]).unsqueeze(0)
+        attn_mask = torch.ones(input_ids.shape[1]).unsqueeze(0)
 
         #   explicit check and setting to facilitate debugging, if needed
         if self.use_gpu:
@@ -4585,7 +5121,7 @@ class HFGenerativeModel:
 
         while True:
 
-            inp_one_time: LongTensor = input_ids
+            inp_one_time: torch.LongTensor = input_ids
 
             if new_tokens_generated > 0:
                 inp_one_time = input_ids[:, -1:]
@@ -4603,8 +5139,10 @@ class HFGenerativeModel:
             # need to invoke forward pass on model
             # outputs = self.model(inp0,inp1,pkv)
 
-            outputs = self.model(input_ids=inp0, attention_mask=inp1, past_key_values=pkv,
-                                 return_dict=True)
+            #   context manager to avoid saving/computing grads in forward pass
+            with torch.no_grad():
+                outputs = self.model(input_ids=inp0, attention_mask=inp1, past_key_values=pkv,
+                                     return_dict=True)
 
             new_tokens_generated += 1
 
@@ -4613,7 +5151,7 @@ class HFGenerativeModel:
             # capture top logits - not currently activated for inference
             # self.register_top_logits(next_token_logits)
             # shape of next_token_logits = torch.Size([1, 32000])
-            # print("next token logits shape - ", next_token_logits.shape)
+            # logger.debug(f"next token logits shape - {next_token_logits.shape}")
 
             if self.temperature and self.sample:
                 next_token_scores = next_token_logits / self.temperature
@@ -4621,14 +5159,14 @@ class HFGenerativeModel:
                 next_token_scores = next_token_logits
 
             # get token from logits
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            probs = torch.nn.functional.softmax(next_token_scores, dim=-1)
 
             if not self.sample:
                 # will pull the 'top logit' only
-                next_tokens = argmax(probs).unsqueeze(0)
+                next_tokens = torch.argmax(probs).unsqueeze(0)
             else:
                 # will apply probabilistic sampling
-                next_tokens = multinomial(probs, num_samples=1).squeeze(1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # new - option to capture logits and output tokens for analysis
             if self.get_logits:
@@ -4648,22 +5186,22 @@ class HFGenerativeModel:
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
             # update generated ids, model inputs, and length for next step
-            input_ids = cat([input_ids, next_tokens[:, None]], dim=-1)
+            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
 
             #   testing output in progress starts here
             """
-            print("update: input_ids -", input_ids)
+            logging.debug(f"update: input_ids - {input_ids}")
             # outputs_detached = outputs.to('cpu')
             outputs_np = np.array(input_ids[0])
             output_str = self.tokenizer.decode(outputs_np)
-            print("update: output string - ", output_str)
+            logging.debug(f"update: output string - {output_str}")
             """
             #   end - testing output in progress
 
             pkv = outputs.past_key_values
 
             # update attention mask
-            attn_mask = cat([attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))], dim=-1)
+            attn_mask = torch.cat([attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))], dim=-1)
 
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
@@ -4728,6 +5266,14 @@ class HFGenerativeModel:
         if self.get_logits:
             output_response.update({"logits": self.logits_record})
             output_response.update({"output_tokens": self.output_tokens})
+            self.logits = self.logits_record
+
+        # output inference parameters
+        self.llm_response = output_str
+        self.usage = usage
+        self.final_prompt = text_prompt
+
+        self.register()
 
         return output_response
 
@@ -4766,7 +5312,7 @@ class HFGenerativeModel:
         #   will be a tensor of shape [1,vocab_size]
 
         logit_size = next_token_logit.shape[-1]
-        logit = squeeze(next_token_logit)
+        logit = torch.squeeze(next_token_logit)
 
         if self.use_gpu:
             logit_array = np.array(logit.to('cpu'))
@@ -4789,7 +5335,6 @@ class HFGenerativeModel:
 
         return top_logits
 
-    @no_grad()
     def function_call(self, context, function=None, params=None, get_logits=True,
                       temperature=-99, max_output=None):
 
@@ -4797,7 +5342,7 @@ class HFGenerativeModel:
         which is packaged in the prompt as the keys for the dictionary output"""
 
         if not self.fc_supported:
-            logging.warning("warning: HFGenerativeModel - loaded model does not support function calls.  "
+            logger.warning("warning: HFGenerativeModel - loaded model does not support function calls.  "
                             "Please either use the standard .inference method with this model, or use a  "
                             "model that has 'function_calls' key set to True in its model card.")
             return []
@@ -4819,7 +5364,16 @@ class HFGenerativeModel:
             self.primary_keys = params
 
         if not self.primary_keys:
-            logging.warning("warning: function call - no keys provided - function call may yield unpredictable results")
+            logger.warning("warning: function call - no keys provided - function call may yield unpredictable results")
+
+        #   START - route to api endpoint
+
+        if self.api_endpoint:
+            return self.function_call_over_api_endpoint(model_name=self.model_name,
+                                                        context=context,params=params, function=function,
+                                                        api_key=self.api_key,get_logits=get_logits)
+
+        #   END - route to api endpoint
 
         prompt = self.fc_prompt_engineer(context, params=self.primary_keys, function=function)
 
@@ -4827,7 +5381,7 @@ class HFGenerativeModel:
 
         tokenizer_output = self.tokenizer.encode(prompt)
         input_token_len = len(tokenizer_output)
-        input_ids = tensor(tokenizer_output).unsqueeze(0)
+        input_ids = torch.tensor(tokenizer_output).unsqueeze(0)
 
         #   explicit check and setting to facilitate debugging
         if self.use_gpu:
@@ -4851,16 +5405,16 @@ class HFGenerativeModel:
         eos_token_id = [self.eos_token_id]
         # eos_token_id = [0]
 
-        eos_token_id_tensor = tensor(eos_token_id).to(input_ids.device)
+        eos_token_id_tensor = torch.tensor(eos_token_id).to(input_ids.device)
 
         # keep track of which sequences are already finished
-        unfinished_sequences = ones(input_ids.shape[0], dtype=long, device=input_ids.device)
+        unfinished_sequences = torch.ones(input_ids.shape[0], dtype=torch.long, device=input_ids.device)
 
         this_peer_finished = False  # used by synced_gpus only
         # auto-regressive generation
         new_tokens_generated = 0
 
-        attn_mask = ones(input_ids.shape[1]).unsqueeze(0)
+        attn_mask = torch.ones(input_ids.shape[1]).unsqueeze(0)
 
         #   explicit check and setting to facilitate debugging, if needed
         if self.use_gpu:
@@ -4875,7 +5429,7 @@ class HFGenerativeModel:
 
         while True:
 
-            inp_one_time: LongTensor = input_ids
+            inp_one_time: torch.LongTensor = input_ids
 
             if new_tokens_generated > 0:
                 inp_one_time = input_ids[:, -1:]
@@ -4893,8 +5447,8 @@ class HFGenerativeModel:
             # need to invoke forward pass on model
             # outputs = self.model(inp0,inp1,pkv)
 
-            outputs = self.model(input_ids=inp0, attention_mask=inp1, past_key_values=pkv,
-                                 return_dict=True)
+            with torch.no_grad():
+                outputs = self.model(input_ids=inp0, attention_mask=inp1, past_key_values=pkv, return_dict=True)
 
             new_tokens_generated += 1
 
@@ -4909,14 +5463,14 @@ class HFGenerativeModel:
                 next_token_scores = next_token_logits
 
             # get token from logits
-            probs = nn.functional.softmax(next_token_scores, dim=-1)
+            probs = torch.nn.functional.softmax(next_token_scores, dim=-1)
 
             if not self.sample:
                 # will pull the 'top logit' only
-                next_tokens = argmax(probs).unsqueeze(0)
+                next_tokens = torch.argmax(probs).unsqueeze(0)
             else:
                 # will apply probabilistic sampling
-                next_tokens = multinomial(probs, num_samples=1).squeeze(1)
+                next_tokens = torch.multinomial(probs, num_samples=1).squeeze(1)
 
             # option to capture logits and output tokens for analysis
             if self.get_logits:
@@ -4935,22 +5489,22 @@ class HFGenerativeModel:
                 next_tokens = next_tokens * unfinished_sequences + pad_token_id * (1 - unfinished_sequences)
 
             # update generated ids, model inputs, and length for next step
-            input_ids = cat([input_ids, next_tokens[:, None]], dim=-1)
+            input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
 
             #   testing output in progress starts here
             """
-            print("update: input_ids -", input_ids)
+            logging.debug(f"update: input_ids - {input_ids}")
             # outputs_detached = outputs.to('cpu')
             outputs_np = np.array(input_ids[0])
             output_str = self.tokenizer.decode(outputs_np)
-            print("update: output string - ", output_str)
+            logging.debug(f"update: output string - {output_str}")
             """
             #   end - testing output in progress
 
             pkv = outputs.past_key_values
 
             # update attention mask
-            attn_mask = cat([attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))], dim=-1)
+            attn_mask = torch.cat([attn_mask, attn_mask.new_ones((attn_mask.shape[0], 1))], dim=-1)
 
             # if eos_token was found in one sentence, set sentence to finished
             if eos_token_id_tensor is not None:
@@ -5039,10 +5593,10 @@ class HFGenerativeModel:
                 output_value = output_rem
 
             if output_type == "string":
-                logging.warning("update: automatic conversion of function call output failed, and attempt to "
+                logger.warning("update: automatic conversion of function call output failed, and attempt to "
                                 "remediate was not successful - %s ", output_str)
             else:
-                logging.info("update: function call output could not be automatically converted, but remediation "
+                logger.info("update: function call output could not be automatically converted, but remediation "
                                 "was successful to type - %s ", output_type)
 
         # INSERT ENDS HERE
@@ -5052,11 +5606,137 @@ class HFGenerativeModel:
         if get_logits:
             output_response.update({"logits": self.logits_record})
             output_response.update({"output_tokens": self.output_tokens})
+            self.logits = self.logits_record
+
+        # output inference parameters
+        self.llm_response = output_value
+        self.usage = usage
+        self.final_prompt = prompt
+
+        self.register()
 
         return output_response
 
+    def inference_over_api_endpoint(self, prompt, context=None, inference_dict=None, get_logits=False):
 
-class GGUFGenerativeModel:
+        """ Called by .inference method when there is an api_endpoint passed in the model constructor. Rather
+        than execute the inference locally, it will be sent over API to inference server. """
+
+        import ast
+        import requests
+
+        url = self.api_endpoint + "{}".format("/")
+        output_raw = requests.post(url, data={"model_name": self.model_name,
+                                              "question": prompt,
+                                              "context": context,
+                                              "api_key": self.api_key,
+                                              "max_output": self.max_output,
+                                              "temperature": self.temperature})
+
+        try:
+
+            output = json.loads(output_raw.text)
+
+            #   will attempt to unpack logits - but catch any exceptions and skip
+            if "logits" in output:
+                try:
+                    logits = ast.literal_eval(output["logits"])
+                    output["logits"] = logits
+                except:
+                    output["logits"] = []
+
+            #   will attempt to unpack output tokens - but catch any exceptions and skip
+            if "output_tokens" in output:
+                try:
+                    # ot_int = [int(x) for x in output["output_tokens"]]
+                    # output["output_tokens"] = ot_int
+                    output_tokens = ast.literal_eval(output["output_tokens"])
+                    output["output_tokens"] = output_tokens
+                except:
+                    output["output_tokens"] = []
+
+        except:
+            logger.warning("warning: api inference was not successful")
+            output = {"llm_response": "api-inference-error", "usage": {}}
+
+        # output inference parameters
+        self.llm_response = output["llm_response"]
+        self.usage = output["usage"]
+        self.final_prompt = prompt
+
+        if "logits" in output:
+            self.logits = output["logits"]
+        if "output_tokens" in output:
+            self.output_tokens = output["output_tokens"]
+
+        self.register()
+
+        return output
+
+    def function_call_over_api_endpoint(self, context="", tool_type="", model_name="", params="", prompt="",
+                                        function=None, endpoint_base=None, api_key=None, get_logits=False):
+
+        """ Called by .function_call method when there is an api_endpoint passed in the model constructor. Rather
+        than execute the inference locally, it will be sent over API to inference server. """
+
+        #   send to api agent server
+
+        import ast
+        import requests
+
+        if endpoint_base:
+            self.api_endpoint = endpoint_base
+
+        if api_key:
+            # e.g., "demo-test"
+            self.api_key = api_key
+
+        if not params:
+            model_name = _ModelRegistry().get_llm_fx_mapping()[tool_type]
+            mc = ModelCatalog().lookup_model_card(model_name)
+            if "primary_keys" in mc:
+                params = mc["primary_keys"]
+
+        url = self.api_endpoint + "{}".format("/agent")
+        output_raw = requests.post(url, data={"model_name": model_name, "api_key": self.api_key, "tool_type": tool_type,
+                                              "function": function, "params": params, "max_output": 50,
+                                              "temperature": 0.0, "sample": False, "prompt": prompt,
+                                              "context": context, "get_logits": True})
+
+        try:
+            # output = ast.literal_eval(output_raw.text)
+            output = json.loads(output_raw.text)
+            if "logits" in output:
+                logits = ast.literal_eval(output["logits"])
+                output["logits"] = logits
+
+            if "output_tokens" in output:
+                ot_int = [int(x) for x in output["output_tokens"]]
+                output["output_tokens"] = ot_int
+
+            # need to clean up logits
+        except:
+            logger.warning("warning: api inference was not successful")
+            output = {}
+
+        logger.info(f"TEST: executed Agent call over API endpoint - {model_name} - {function} - {output}")
+
+        # output inference parameters
+        self.llm_response = output["llm_response"]
+        self.usage = output["usage"]
+        self.final_prompt = prompt
+
+        if "logits" in output:
+            self.logits = output["logits"]
+        if "output_tokens" in output:
+            self.output_tokens = output["output_tokens"]
+
+        self.register()
+
+        return output
+
+
+class GGUFGenerativeModel(BaseModel):
 
     """ Implementation of GGUF Model class - instantiate and run inferences and function calls using
     GGUF llama.cpp models """
@@ -5075,7 +5755,18 @@ class GGUFGenerativeModel:
 
     def __init__(self, model_name=None, model_card=None, api_key=None, prompt_wrapper=None, instruction_following=False,
                  context_window=2048, use_gpu_if_available=True, get_logits=False,
-                 sample=True,max_output=100, temperature=0.3):
+                 sample=True,max_output=100, temperature=0.3, api_endpoint=None, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "GGUFGenerativeModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.prompt = None
+        self.final_prompt = None
 
         #   set verbose level in environ level - will be picked up by callback in llama_cpp
         os.environ["llama_cpp_verbose"] = GGUFConfigs().get_config("llama_cpp_verbose")
@@ -5095,7 +5786,7 @@ class GGUFGenerativeModel:
 
         if max_output > gguf_configs_max:
             # truncate max output to GGUFConfigs max
-            logging.warning(f"update: requested output len - {max_output} > {gguf_configs_max}, which is the "
+            logger.warning(f"update: requested output len - {max_output} > {gguf_configs_max}, which is the "
                             f"current GGUF default max.\n--Truncating to {gguf_configs_max} output tokens.\n--Note: "
                             f"to change GGUF default max to new integer amount, say 500:\n "
                             f"  GGUFConfigs().set_config(\"max_output_tokens\", 500)"
@@ -5246,8 +5937,11 @@ class GGUFGenerativeModel:
 
         # no api key expected or required
         self.api_key = api_key
+        self.api_endpoint = api_endpoint
 
         self.error_message = "\nUnable to identify and load GGUF Generative model."
+
+        self.post_init()
 
     def load_model_for_inference(self, model_repo_path, model_card = None):
 
@@ -5372,7 +6066,7 @@ class GGUFGenerativeModel:
 
                                 if v1 < 14:
 
-                                    logging.warning(f"warning: detected older version of macos - {macos_ver} - "
+                                    logger.warning(f"warning: detected older version of macos - {macos_ver} - "
                                                     f"which may produce errors related to the Accelerate framework.\n"
                                                     f"To remove this warning: (1) upgrade to Sonoma (>14.0) or \n(2) set "
                                                     f"GGUF configs to use non Accelerate binary by default:\n"
@@ -5439,7 +6133,7 @@ class GGUFGenerativeModel:
                     if fall_back_option:
                         try:
 
-                            logging.warning("update: Not successful loading CUDA lib, so reverting to CPU driver.")
+                            logger.warning("update: Not successful loading CUDA lib, so reverting to CPU driver.")
 
                             return ctypes.CDLL(str(fall_back_option), **cdll_args)
                         except:
@@ -5480,7 +6174,7 @@ class GGUFGenerativeModel:
         context_window = self.n_ctx()
 
         if input_len > context_window:
-            logging.warning("update: GGUFGenerativeModel - input is too long for model context window - truncating")
+            logger.warning("update: GGUFGenerativeModel - input is too long for model context window - truncating")
             min_output_len = 10
             prompt_tokens = prompt_tokens[0:context_window-min_output_len]
             input_len = len(prompt_tokens)
@@ -5593,7 +6287,7 @@ class GGUFGenerativeModel:
                 self.prev = list(self.eval_tokens)
                 token = self.sample(logits_array=logits)
 
-                # print("token: ", token)
+                #logger.debug("token: {token}")
 
                 self.accept(id=id,apply_grammar=None)
 
@@ -5615,7 +6309,7 @@ class GGUFGenerativeModel:
                     break
 
                 if tokens_created > self.max_output_len:
-                    logging.info("update: GGUFGenerativeModel - stopping generation loop - reached limit of max output len")
+                    logger.info("update: GGUFGenerativeModel - stopping generation loop - reached limit of max output len")
                     break
 
     def tokenize(self, text, add_bos=True, special=False):
@@ -5807,7 +6501,7 @@ class GGUFGenerativeModel:
 
         # set api_key
         os.environ[env_var] = api_key
-        logging.info("update: added and stored GGUF api_key in environmental variable- %s", env_var)
+        logger.info("update: added and stored GGUF api_key in environmental variable- %s", env_var)
 
         return self
 
@@ -5818,7 +6512,7 @@ class GGUFGenerativeModel:
         self.api_key = os.environ.get(env_var)
 
         if not self.api_key:
-            logging.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
+            logger.error("error: _get_api_key could not successfully retrieve value from: %s ", env_var)
 
         return self.api_key
 
@@ -5970,7 +6664,7 @@ class GGUFGenerativeModel:
 
         #   show warning if function calling model
         if self.fc_supported:
-            logging.warning("warning: this is a function calling model - using .inference may lead to unexpected "
+            logger.warning("warning: this is a function calling model - using .inference may lead to unexpected "
                             "results.   Recommended to use the .function_call method to ensure correct prompt "
                             "template packaging.")
 
@@ -5988,6 +6682,12 @@ class GGUFGenerativeModel:
 
             if "max_tokens" in inference_dict:
                 self.target_requested_output_tokens = inference_dict["max_tokens"]
+
+        #   START - route to api endpoint
+        if self.api_endpoint:
+            return self.inference_over_api_endpoint(prompt, context=self.add_context,
+                                                    inference_dict=inference_dict)
+        #   END - route to api endpoint
 
         text_prompt = prompt
 
@@ -6007,6 +6707,18 @@ class GGUFGenerativeModel:
 
         output_response = self._inference(text_prompt)
 
+        #   update linked to BaseModel
+        self.prompt = prompt
+        self.final_prompt = text_prompt
+        self.usage = output_response["usage"]
+        self.llm_response = output_response["llm_response"]
+
+        if "logits" in output_response:
+            self.logits = output_response["logits"]
+
+        self.register()
+        #   end - update
+
         return output_response
 
     def function_call(self, context, function=None, params=None, get_logits=True,
@@ -6016,7 +6728,7 @@ class GGUFGenerativeModel:
         which is packaged in the prompt as the keys for python dictionary output"""
 
         if not self.fc_supported:
-            logging.warning("warning: GGUFGenerativeModel - loaded model does not support function calls.  "
+            logger.warning("warning: GGUFGenerativeModel - loaded model does not support function calls.  "
                             "Please either use the standard .inference method with this model, or use a GGUF "
                             "model that has 'function_calls' key set to True in its model card.")
             return []
@@ -6032,7 +6744,7 @@ class GGUFGenerativeModel:
             self.primary_keys = params
 
         if not self.primary_keys:
-            logging.warning("warning: GGUF - function call - no keys provided - "
+            logger.warning("warning: GGUF - function call - no keys provided - "
                             "function call may yield unpredictable results")
 
         if not params:
@@ -6040,6 +6752,15 @@ class GGUFGenerativeModel:
 
         if not function:
             function = self.function[0]
+
+        #   START - route to api endpoint
+
+        if self.api_endpoint:
+            return self.function_call_over_api_endpoint(model_name=self.model_name,
+                                                        context=context,params=params, function=function,
+                                                        api_key=self.api_key,get_logits=get_logits)
+
+        #   END - route to api endpoint
 
         # prepare SLIM prompt
         class_str = ""
@@ -6091,11 +6812,23 @@ class GGUFGenerativeModel:
                     output_response.update({"llm_response": output_rem})
 
             if output_type == "string":
-                logging.warning("update: automatic conversion of function call output failed, and attempt to "
+                logger.warning("update: automatic conversion of function call output failed, and attempt to "
                                 "remediate was not successful - %s ", output_str)
             else:
-                logging.info("update: function call output could not be automatically converted, but remediation "
+                logger.info("update: function call output could not be automatically converted, but remediation "
                                 "was successful to type - %s ", output_type)
+
+        #   update linked to BaseModel
+        self.prompt = ""
+        self.final_prompt = full_prompt
+        self.usage = output_response["usage"]
+        self.llm_response = output_response["llm_response"]
+
+        if "logits" in output_response:
+            self.logits = output_response["logits"]
+
+        self.register()
+        #   end - update
 
         return output_response
 
@@ -6125,7 +6858,7 @@ class GGUFGenerativeModel:
 
         #   show warning if function calling model
         if self.fc_supported:
-            logging.warning("warning: this is a function calling model - using .inference may lead to unexpected "
+            logger.warning("warning: this is a function calling model - using .inference may lead to unexpected "
                             "results.   Recommended to use the .function_call method to ensure correct prompt "
                             "template packaging.")
 
@@ -6178,7 +6911,7 @@ class GGUFGenerativeModel:
         context_window = self.n_ctx()
 
         if input_len > context_window:
-            logging.warning("update: GGUFGenerativeModel - input is too long for model context window - truncating")
+            logger.warning("update: GGUFGenerativeModel - input is too long for model context window - truncating")
             min_output_len = 10
             prompt_tokens = prompt_tokens[0:context_window-min_output_len]
             input_len = len(prompt_tokens)
@@ -6210,13 +6943,161 @@ class GGUFGenerativeModel:
 
         return text_str
 
+    def function_call_over_api_endpoint(self, context="", tool_type="", model_name="", params="", prompt="",
+                             function=None, endpoint_base=None, api_key=None, get_logits=False):
 
-class WhisperCPPModel:
+        """ Called by .function_call method when there is an api_endpoint passed in the model constructor. Rather
+        than execute the inference locally, it will be sent over API to inference server. """
+
+        #   send to api agent server
+
+        import ast
+        import requests
+
+        if endpoint_base:
+            self.api_endpoint = endpoint_base
+
+        if api_key:
+            # e.g., "demo-test"
+            self.api_key = api_key
+
+        if not params:
+            model_name = _ModelRegistry().get_llm_fx_mapping()[tool_type]
+            mc = ModelCatalog().lookup_model_card(model_name)
+            if "primary_keys" in mc:
+                params = mc["primary_keys"]
+
+        url = self.api_endpoint + "{}".format("/agent")
+        output_raw = requests.post(url, data={"model_name": model_name, "api_key": self.api_key, "tool_type": tool_type,
+                                              "function": function, "params": params, "max_output": 50,
+                                              "temperature": 0.0, "sample": False, "prompt": prompt,
+                                              "context": context, "get_logits": True})
+
+        try:
+
+            output = json.loads(output_raw.text)
+
+            #   will attempt to unpack logits - but catch any exceptions and skip
+            if "logits" in output:
+                try:
+                    logits = ast.literal_eval(output["logits"])
+                    output["logits"] = logits
+                except:
+                    output["logits"] = []
+
+            #   will attempt to unpack output tokens - but catch any exceptions and skip
+            if "output_tokens" in output:
+                try:
+                    ot_int = [int(x) for x in output["output_tokens"]]
+                    output["output_tokens"] = ot_int
+                    # output_tokens = ast.literal_eval(output["output_tokens"])
+                    # output["output_tokens"] = output_tokens
+                except:
+                    output["output_tokens"] = []
+
+            # output = ast.literal_eval(output_raw.text)
+            """
+            output = json.loads(output_raw.text)
+            if "logits" in output:
+                logits = ast.literal_eval(output["logits"])
+                logger.debug(f"logits: {logits}")
+                output["logits"] = logits
+            if "output_tokens" in output:
+                ot_int = [int(x) for x in output["output_tokens"]]
+                output["output_tokens"] = ot_int
+            """
+
+        except:
+            logger.warning("warning: api inference was not successful")
+            output = {"llm_response": "api-inference-error", "usage": {}}
+
+        #   update linked to BaseModel
+        self.prompt = prompt
+        self.final_prompt = prompt
+        self.usage = output["usage"]
+        self.llm_response = output["llm_response"]
+
+        if "logits" in output:
+            self.logits = output["logits"]
+
+        self.register()
+        #   end - update
+
+        return output
+
+    def inference_over_api_endpoint(self, prompt, context=None, inference_dict=None, get_logits=False):
+
+        """ Called by .inference method when there is an api_endpoint passed in the model constructor. Rather
+        than execute the inference locally, it will be sent over API to inference server. """
+
+        import ast
+        import requests
+
+        url = self.api_endpoint + "{}".format("/")
+        output_raw = requests.post(url, data={"model_name": self.model_name,
+                                              "question": prompt,
+                                              "context": context,
+                                              "api_key": self.api_key,
+                                              "max_output": self.max_output_len,
+                                              "temperature": self.temperature})
+
+        try:
+            output = json.loads(output_raw.text)
+
+            #   will attempt to unpack logits - but catch any exceptions and skip
+            if "logits" in output:
+                try:
+                    logits = ast.literal_eval(output["logits"])
+                    output["logits"] = logits
+                except:
+                    output["logits"] = []
+
+            #   will attempt to unpack output tokens - but catch any exceptions and skip
+            if "output_tokens" in output:
+                try:
+                    # ot_int = [int(x) for x in output["output_tokens"]]
+                    # output["output_tokens"] = ot_int
+                    output_tokens = ast.literal_eval(output["output_tokens"])
+                    output["output_tokens"] = output_tokens
+                except:
+                    output["output_tokens"] = []
+
+        except:
+            logger.warning("warning: api inference was not successful")
+            output = {"llm_response": "api-inference-error", "usage": {}}
+
+        #   update linked to BaseModel
+        self.prompt = prompt
+        self.final_prompt = prompt
+        self.usage = output["usage"]
+        self.llm_response = output["llm_response"]
+
+        if "logits" in output:
+            self.logits = output["logits"]
+
+        self.register()
+        #   end - update
+
+        return output
+
+
+class WhisperCPPModel(BaseModel):
 
     """ WhisperCPPModel is an implementation of the Whisper voice transcription model running on GGML, rather
     than Pytorch. """
 
-    def __init__(self, model_name=None, model_card=None, use_gpu_if_available=True):
+    def __init__(self, model_name=None, model_card=None, use_gpu_if_available=True, **kwargs):
+
+        super().__init__()
+
+        self.model_class = "WhisperCPPModel"
+        self.model_category = "generative"
+        self.llm_response = None
+        self.usage = None
+        self.logits = None
+        self.output_tokens = None
+        self.prompt = None
+        self.final_prompt = None
 
         #   set verbose level in environ level - will be picked up by callback in whisper_cpp
         os.environ["whisper_cpp_verbose"] = GGUFConfigs().get_config("whisper_cpp_verbose")
@@ -6265,6 +7146,8 @@ class WhisperCPPModel:
                             and sys.platform.lower() in GGUFConfigs().get_config("cuda_platforms")
                             and gpu_available["drivers_current"] and gpu_available["gpu_found"]
                             and use_gpu_if_available)
+
+        self.post_init()
 
     def load_model_for_inference(self, model_repo_path, model_card = None):
 
@@ -6367,7 +7250,7 @@ class WhisperCPPModel:
 
                                 if v1 < 14:
 
-                                    logging.warning(f"warning: detected older version of macos - {macos_ver} - "
+                                    logger.warning(f"warning: detected older version of macos - {macos_ver} - "
                                                     f"which may produce errors related to the Accelerate framework.\n"
                                                     f"To remove this warning: (1) upgrade to Sonoma (>14.0) or \n(2) set "
                                                     f"GGUF configs to use non Accelerate binary by default:\n"
@@ -6409,7 +7292,8 @@ class WhisperCPPModel:
                     # NEW INSERT - if fail, and CUDA selected, then try to fall back to matching CPU version
                     if fall_back_option:
                         try:
-                            logging.warning("update: Not successful loading primary lib, so reverting to CPU driver.")
+                            logger.warning("update: Not successful loading primary lib, so reverting to secondary "
+                                           "driver (which may be slower).")
 
                             return ctypes.CDLL(str(fall_back_option), **cdll_args)
                         except:
@@ -6424,7 +7308,7 @@ class WhisperCPPModel:
                         raise GGUFLibNotLoadedException("whisper_cpp_backend",sys.platform.lower(),
                                                         self.use_gpu, _lib_path, custom_path)
             else:
-                logging.warning(f"update: looking for WhisperCPP lib - path does not exist - {str(_lib_path)}")
+                logger.warning(f"update: looking for WhisperCPP lib - path does not exist - {str(_lib_path)}")
 
         # Try to load the shared library, handling potential errors
         # *** something has gone wrong - could not find the lib files
@@ -6457,7 +7341,7 @@ class WhisperCPPModel:
 
         if not file.endswith(".wav"):
 
-            logging.info("update: WhisperCPPModel - inference - input file needs to be converted to .wav - "
+            logger.info("update: WhisperCPPModel - inference - input file needs to be converted to .wav - "
                          "will try to do right now.")
 
             new_file_path = Utilities().convert_media_file_to_wav(prompt,
@@ -6465,7 +7349,7 @@ class WhisperCPPModel:
                                                                   file_out="converted_file_tmp.wav")
 
             if not new_file_path:
-                logging.warning("update: WhisperCPPModel - inference - conversion was not successful.  "
+                logger.warning("update: WhisperCPPModel - inference - conversion was not successful.  "
                                 "The most likely causes of this error - \n"
                                 "1.  File type is not supported - the following are the supported file types - "
                                 "mp3, m4a, mp4, wma, aac, ogg, flv. \n"
@@ -6479,7 +7363,7 @@ class WhisperCPPModel:
                 return null_output
 
             else:
-                logging.info(f"update: WhisperCPPModel - inference - file conversion to .wav successful - "
+                logger.info(f"update: WhisperCPPModel - inference - file conversion to .wav successful - "
                              f"new file at tmp path - {new_file_path}")
 
                 file = new_file_path
@@ -6517,6 +7401,15 @@ class WhisperCPPModel:
                       "language": self.language}
 
         response = {"llm_response": output, "usage": usage_dict, "segments": result["segments"]}
+
+        #   update linked to BaseModel
+        self.prompt = ""
+        self.final_prompt = ""
+        self.usage = response["usage"]
+        self.llm_response = response["llm_response"]
+
+        self.register()
+        #   end - update
 
         return response
 
@@ -6673,13 +7566,15 @@ class WhisperCPPModel:
         return self._lib
 
 
-class LLMWareSemanticModel:
+class LLMWareSemanticModel(BaseModel):
 
     """ LLMWareSemanticModel class implements the LLMWareSemanticModel API, which is based on the SentenceTransformer
     architecture. """
 
     def __init__(self, model_name=None, model=None, embedding_dims=None, max_len=150,
-                 model_card=None, api_key=None):
+                 model_card=None, api_key=None, **kwargs):
+
+        super().__init__()
 
         self.model_name = model_name
         self.error_message = "\nUnable to process LLMWare Semantic Model. Please try again later"
@@ -6708,7 +7603,7 @@ class LLMWareSemanticModel:
         self.transformer_base_model = None
 
         if model:
-            logging.info("update: SemanticEmbedding model received model - will attempt to load as "
+            logger.info("update: SemanticEmbedding model received model - will attempt to load as "
                          "Sentence Transformer model")
 
             self.model = model
@@ -6725,7 +7620,7 @@ class LLMWareSemanticModel:
                     #   Pooling layer, and further consolidates the embeddings
 
                     if len(model) > 2:
-                        logging.info("update: Sentence Transformer model with more than two layers - unusual - "
+                        logger.info("update: Sentence Transformer model with more than two layers - unusual - "
                                      " depending upon the architecture, there may be issues loading the model- %s",
                                      len(model))
 
@@ -6737,7 +7632,7 @@ class LLMWareSemanticModel:
                         #               self.embedding_dims = last_layer_config["out_features"]
 
                 except:
-                    logging.error("error: could not identify model to run embedding - ", model_name)
+                    logger.error("error: could not identify model to run embedding - ", model_name)
                     raise ModelNotFoundException(model_name)
 
         if model_card and not model:
@@ -6794,6 +7689,111 @@ class LLMWareSemanticModel:
         return np.linalg.norm(a - b) * np.linalg.norm(a-b)
 
 
+class LocalTokenizer:
+
+    """ LocalTokenizer class manages and caches tokenizer.json files for common base models used in
+    LLMWare.   Enables re-instantiating the Tokenizer directly using tokenizers library. """
+
+    def __init__(self, tokenizer_fn):
+
+        #   tokenizer files kept in llmware repo @ llmware/bonchon for easy access
+        self.hf_repo_tokenizers = "llmware/bonchon"
+
+        #   keeping a few key parameters hard-coded for easy access and assignment
+        self.supported_model = {"tokenizer_phi3.json": {"bos_id": 1, "bos_token": "<s>",
+                                                        "eos_id": 32000, "eos_token": "<|endoftext|>"},
+
+                                "tokenizer_stablelm.json": {"bos_id": 0, "bos_token": "<|endoftext|>",
+                                                            "eos_id": 0, "eos_token": "<|endoftext|>"},
+
+                                "tokenizer_tl.json": {"bos_id": 1, "bos_token": "<s>",
+                                                      "eos_id": 2, "eos_token": "</s>"}
+                                }
+
+        if tokenizer_fn in self.supported_model:
+            self.bos_token_id = self.supported_model[tokenizer_fn]["bos_id"]
+            self.bos_token = self.supported_model[tokenizer_fn]["bos_token"]
+            self.eos_token_id = self.supported_model[tokenizer_fn]["eos_id"]
+            self.eos_token = self.supported_model[tokenizer_fn]["eos_token"]
+
+        try:
+            #   use the tokenizer library to instantiate - less overhead than transformers library when
+            #   only the tokenizer is needed
+            from tokenizers import Tokenizer
+        except:
+            raise LLMWareException(message="Exception: requires tokenizers to be installed.")
+
+        model_repo_path = LLMWareConfig().get_model_repo_path()
+
+        if not os.path.exists(model_repo_path):
+            os.mkdir(model_repo_path)
+
+        tokenizers_cache = os.path.join(model_repo_path, "tokenizers_local_cache")
+
+        if not os.path.exists(tokenizers_cache):
+            os.mkdir(tokenizers_cache)
+
+        tokenizers_in_cache = os.listdir(tokenizers_cache)
+
+        logger.debug(f"update: LocalTokenizer - tokenizers found in cache: {tokenizers_in_cache}")
+
+        if tokenizer_fn not in tokenizers_in_cache:
+            logger.info(f"update: LocalTokenizer - need to fetch tokenizer - {tokenizer_fn}")
+            self.fetch_tokenizer_from_hb(self.hf_repo_tokenizers,tokenizer_fn, tokenizers_cache)
+
+        self.tokenizer = Tokenizer.from_file(os.path.join(tokenizers_cache, tokenizer_fn))
+
+    def fetch_tokenizer_from_hb(self, repo, file, local_path):
+
+        """ Retrieves the tokenizer json file from the llmware/bonchon repo. """
+
+        # need to pull from HF cache
+        from huggingface_hub import hf_hub_download
+
+        downloader = hf_hub_download(repo, file, local_dir=local_path, local_dir_use_symlinks=False)
+
+        #   remove ongoing links, if any, created by attributes not in the file repo
+        files_created = os.listdir(local_path)
+        if ".huggingface" in files_created:
+            try:
+                shutil.rmtree(os.path.join(local_path,".huggingface"))
+                logger.debug("removed: .huggingface")
+            except:
+                logger.info(f"update: .huggingface folder created in repo and not auto-removed.")
+                pass
+
+        if ".gitattributes" in files_created:
+            try:
+                os.remove(os.path.join(local_path, ".gitattributes"))
+                logger.debug("removed: .gitattributes")
+            except:
+                logger.info(f"update: .gitattributes created in repo and not auto-removed.")
+                pass
+
+        return True
+
+    def encode(self, seq):
+
+        """ Encode the sequence and return the token ids in a list. """
+
+        return self.tokenizer.encode(seq, add_special_tokens=False).ids
+
+    def decode(self, seq, strip_bos_token=True):
+
+        """ Decode a list of tokens and return the decoded string. """
+
+        if not isinstance(seq, list):
+            seq = [seq]
+
+        decoded = self.tokenizer.decode(seq, skip_special_tokens=False)
+
+        if strip_bos_token:
+            if decoded.startswith(self.bos_token):
+                decoded = decoded[len(self.bos_token):]
+
+        return decoded
+
+
 class ModelResources:
 
     """ ModelResources is a global state mechanism used in conjunction with deploying the LLMWare Inference
@@ -6819,7 +7819,7 @@ class ModelResources:
             cls._ModelState.models_list.append(model_name)
             cls._ModelState.models_loaded += 1
 
-            logging.info(f"update: ModelResources - {cls._ModelState.models_loaded} - "
+            logger.info(f"update: ModelResources - {cls._ModelState.models_loaded} - "
                          f"{cls._ModelState.models_list}")
 
     @classmethod
@@ -6829,12 +7829,18 @@ class ModelResources:
 
     @classmethod
     def check_if_model_loaded(cls, model_name):
+
+        """ Utility method that checks if the model has already been loaded. """
+
         if model_name in cls._ModelState.models_list:
             return True
         return False
 
     @classmethod
     def fetch_model(cls, model_name):
+
+        """ Returns the instantiated model that is already loaded in memory. """
+
         return getattr(cls._ModelState, model_name)
 
 
@@ -6843,13 +7849,13 @@ class LLMWareInferenceServer:
     """ LLMWare Inference Server class implements server-side lightweight inference server with two
     primary APIs currently supported:
 
-        1.  /  - main inference of general purpose LLM deployed on inference server at time of start.
+        1.  /      - main inference of general purpose LLM deployed on inference server at time of start.
         2.  /agent - supports agent process over API with multiple SLIM models deployed.
 
     """
 
     def __init__(self, model_name, model_catalog=None, hf_api_key=None, secret_api_key=None, home_path=None,
-                 port=8080, verbose=True):
+                 port=8080, verbose=True, temperature=0.0, sample=False, max_output=100, debug=False):
 
         self.HOME_PATH = home_path
         self.hf_api_key = hf_api_key
@@ -6861,14 +7867,30 @@ class LLMWareInferenceServer:
         else:
             self.model_catalog = model_catalog
 
-        self.model = self.model_catalog.load_model(model_name, api_key=self.hf_api_key)
+        self.model_name = model_name
+        self.model = self.model_catalog.load_model(model_name, api_key=self.hf_api_key,
+                                                   temperature=temperature, sample=sample, max_output=max_output)
 
         self.verbose = verbose
+
+        import logging
+        logging.basicConfig(level=30)
+        global inference_server_logger
+        inference_server_logger = logging.getLogger("inference_server_logger")
+
+        if debug:
+            inference_server_logger.setLevel(level=10)
+        else:
+            if self.verbose:
+                # set logging at "INFO"
+                inference_server_logger.setLevel(level=20)
+            else:
+                # keep logging at "WARNING"
+                inference_server_logger.setLevel(level=30)
 
     def start(self):
 
         """ Starts the server runtime. """
-
         # if inference server started, then try to get flask dependency
         try:
             global flask
@@ -6896,19 +7918,26 @@ class LLMWareInferenceServer:
         my_port = self.port
         app.run(host=my_host, port=my_port)
 
-    def _llmware_inference(self, prompt, context):
+    def _llmware_inference(self, prompt, context, model_name):
 
         """ Executes a LLM model inference from the main index route. """
 
         t1 = time.time()
 
-        output = self.model.inference(prompt, add_context=context, add_prompt_engineering=True)
+        if not ModelResources().check_if_model_loaded(model_name):
+            self._load_model(model_name, get_logits=False, sample=False,temperature=0.0, max_output=200)
+
+        model = ModelResources().fetch_model(model_name)
+
+        output = model.inference(prompt, add_context=context, add_prompt_engineering=True)
+
+        if "logits" in output:
+            output["logits"] = str(output["logits"])
 
         t2 = time.time()
 
-        if self.verbose:
-            print("update: model inference output - ", output["llm_response"], output["usage"])
-            print("update: total processing time: ", t2 - t1)
+        inference_server_logger.info(f"update: model inference output - {output['llm_response']} - {output['usage']}")
+        inference_server_logger.info(f"update: total processing time: {t2-t1}")
 
         return output
 
@@ -6920,6 +7949,7 @@ class LLMWareInferenceServer:
         api_key = ""
         question = ""
         context = ""
+        model_name = ""
 
         # if inference server started, then try to get flask dependency
         try:
@@ -6929,8 +7959,7 @@ class LLMWareInferenceServer:
 
         for keys in request.form:
 
-            if self.verbose:
-                print("update: keys / values input received: ", keys, request.form.get(keys))
+            inference_server_logger.debug(f"update: keys / values input received - {keys} - {request.form.get(keys)}")
 
             if keys == "context":
                 context = request.form.get(keys)
@@ -6948,6 +7977,9 @@ class LLMWareInferenceServer:
             if keys == "api_key":
                 api_key = request.form.get(keys)
 
+            if keys == "model_name":
+                model_name = request.form.get(keys)
+
         t1 = time.time()
 
         if not question and not context:
@@ -6958,11 +7990,13 @@ class LLMWareInferenceServer:
             output_str = "Got your message - Thanks for testing - API key not confirmed!"
             return jsonify({"message": output_str})
 
+        if not model_name:
+            model_name = self.model_name
         # start processing here
 
-        output = self._llmware_inference(question, context)
+        output = self._llmware_inference(question, context, model_name)
 
-        cuda.empty_cache()
+        # cuda.empty_cache()
 
         return jsonify(output)
 
@@ -6989,8 +8023,7 @@ class LLMWareInferenceServer:
 
         for keys in request.form:
 
-            if self.verbose:
-                print("update: keys / values input received: ", keys, request.form.get(keys))
+            inference_server_logger.debug(f"update: keys / values input received: {keys} - {request.form.get(keys)}")
 
             if keys == "context":
                 context = request.form.get(keys)
@@ -7050,7 +8083,7 @@ class LLMWareInferenceServer:
         output = self._llmware_agent_function_call(context=context, tool_type=tool_type, model_name=model, function=fx,
                                                   temperature=temperature, sample=sample,params=params,
                                                   max_output=max_output, prompt=prompt,get_logits=get_logits)
-        cuda.empty_cache()
+        # cuda.empty_cache()
 
         return jsonify(output)
 
@@ -7066,11 +8099,10 @@ class LLMWareInferenceServer:
         temperature = float(temperature)
         max_output = int(max_output)
 
-        if self.verbose:
-            print(f"update: llmware_agent_function_call - {model_name} - {tool_type}")
+        inference_server_logger.debug(f"update: llmware_agent_function_call - {model_name} - {tool_type}")
 
         if not ModelResources().check_if_model_loaded(model_name):
-            self._load_model(model_name)
+            self._load_model(model_name, get_logits=True,sample=False,temperature=0.0,max_output=max_output)
 
         model = ModelResources().fetch_model(model_name)
 
@@ -7083,8 +8115,8 @@ class LLMWareInferenceServer:
             output = model.inference(prompt,add_context=context,add_prompt_engineering="default_with_context",
                                      get_logits=get_logits)
 
-        if self.verbose:
-            print(f"update: llmware_agent_function_call - model response: ", output)
+        inference_server_logger.info(f"update: llmware_agent_function_call - model_response - {output['llm_response']} "
+                                     f"- {output['usage']}")
 
         if "logits" in output:
             output["logits"] = str(output["logits"])
@@ -7108,8 +8140,7 @@ class LLMWareInferenceServer:
 
         for keys in request.form:
 
-            if self.verbose:
-                print("update: keys / values input received ", keys, request.form.get(keys))
+            inference_server_logger.debug(f"update: keys / values input received - {keys} - {request.form.get(keys)}")
 
             if keys == "model" or keys == "model_name":
                 model_name = request.form.get(keys)
@@ -7126,13 +8157,13 @@ class LLMWareInferenceServer:
 
         return jsonify(output)
 
-    def _load_model(self, model_name):
+    def _load_model(self, model_name, sample=False, temperature=0.0, get_logits=False,max_output=200):
 
         if not ModelResources().check_if_model_loaded(model_name):
-            ModelResources().load_model(model_name)
+            ModelResources().load_model(model_name, sample=sample, temperature=temperature, get_logits=get_logits,
+                                        max_output=max_output)
         else:
-            if self.verbose:
-                print("model already loaded - ", model_name)
+            inference_server_logger.debug(f"model already loaded - {model_name}")
 
         return True
 
@@ -7178,7 +8209,7 @@ class PyTorchLoader:
 
             if self.api_key:
 
-                if cuda.is_available():
+                if torch.cuda.is_available():
                     model = AutoModelForCausalLM.from_pretrained(model_name, token=self.api_key,
                                                                  trust_remote_code=self.trust_remote_code,
                                                                  torch_dtype="auto")
@@ -7187,7 +8218,7 @@ class PyTorchLoader:
                                                                  trust_remote_code=self.trust_remote_code)
 
             else:
-                if cuda.is_available():
+                if torch.cuda.is_available():
                     model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=self.trust_remote_code,
                                                                  torch_dtype="auto")
                 else:
@@ -7220,7 +8251,7 @@ class PyTorchLoader:
 
             if self.api_key:
 
-                if cuda.is_available():
+                if torch.cuda.is_available():
                     model = AutoModel.from_pretrained(model_name, token=self.api_key,
                                                       trust_remote_code=self.trust_remote_code,
                                                       torch_dtype="auto")
@@ -7229,7 +8260,7 @@ class PyTorchLoader:
                                                       trust_remote_code=self.trust_remote_code)
 
             else:
-                if cuda.is_available():
+                if torch.cuda.is_available():
                     model = AutoModel.from_pretrained(model_name, trust_remote_code=self.trust_remote_code,
                                                       torch_dtype="auto")
                 else:

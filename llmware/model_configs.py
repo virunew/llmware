@@ -1,7 +1,25 @@
+# Copyright 2023-2024 llmware
+
+# Licensed under the Apache License, Version 2.0 (the "License"); you
+# may not use this file except in compliance with the License.  You
+# may obtain a copy of the License at
+
+# http://www.apache.org/licenses/LICENSE-2.0
+
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
+# implied.  See the License for the specific language governing
+# permissions and limitations under the License.
+
+
 """Global Default Configs for Models, Finetune Wrappers and Prompt Instructions Catalog.
 
-These configs generally do not need to be accessed directly, but can be viewed and updated through
+These configs generally do not need to be accessed directly, but can be viewed, accessed and modified through
 ModelCatalog and PromptCatalog classes.
+
+For customization, there is also the option in ModelCatalog to load a custom model catalog from json file, which
+would over-write this list.
 """
 
 global_model_repo_catalog_list = [
@@ -241,9 +259,13 @@ global_model_repo_catalog_list = [
     {"model_name": "gpt-3.5-turbo-0125", "display_name": "GPT-3.5-Turbo-0125", "model_family": "OpenAIGenModel",
      "model_category": "generative-api", "model_location": "api", "context_window": 16385},
 
-    # generative AIB models - aib-read-gpt - "main model"
-    {"model_name": "aib-read-gpt", "display_name": "AIB-READ-GPT", "model_family": "AIBReadGPTModel",
-     "model_category": "generative-api", "model_location": "api", "context_window": 2048},
+    # gpt-4o model announced in May 2024
+    {"model_name": "gpt-4o", "display_name": "GPT-4o", "model_family": "OpenAIGenModel",
+     "model_category": "generative-api", "model_location": "api", "context_window": 128000},
+
+    # gpt-4o-2024-0513 model announced in May 2024
+    {"model_name": "gpt-4o-2024-05-13", "display_name": "gpt-4o-2024-05-13", "model_family": "OpenAIGenModel",
+     "model_category": "generative-api", "model_location": "api", "context_window": 128000},
 
     # base supporting models and components
     {"model_name": "bert", "display_name": "Bert", "model_family": "BaseModel", "model_category": "base",
@@ -396,6 +418,7 @@ global_model_repo_catalog_list = [
     "gguf_file": "bling-phi-3.gguf",
     "gguf_repo": "llmware/bling-phi-3-gguf",
     "snapshot": True,
+    "tokenizer_local": "tokenizer_phi3.json",
     "link": "https://huggingface.co/llmware/bling-phi-3-gguf",
     "custom_model_files": [], "custom_model_repo": ""},
 
@@ -502,6 +525,7 @@ global_model_repo_catalog_list = [
      "gguf_file": "Phi-3-mini-4k-instruct-q4.gguf",
      "gguf_repo": "microsoft/Phi-3-mini-4k-instruct-gguf",
      "link": "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct-gguf",
+     "tokenizer_local": "tokenizer_phi3.json",
      "custom_model_files": [], "custom_model_repo": ""},
 
     {"model_name": "microsoft/Phi-3-mini-4k-instruct", "display_name": "phi-3",
@@ -567,6 +591,7 @@ global_model_repo_catalog_list = [
   "gguf_file": "tiny-llama-chat.gguf",
   "gguf_repo": "llmware/bonchon",
   "link": "https://huggingface.co/llmware/bonchon",
+  "tokenizer_local": "tokenizer_tl.json",
   "custom_model_files": [], "custom_model_repo": ""},
 
  # end - new llama-3 quantized models
@@ -615,6 +640,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["people", "location", "organization", "misc"],
      "fc_output_values": [],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [], "marker_token_lookup": {},
      "function": ["classify"],
      "snapshot": True},
@@ -632,6 +658,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["sentiment"],
      "fc_output_values": ["positive", "neutral", "negative"],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [1066, 22198, 17821],
      "marker_token_lookup": {1066: "positive", 22198: "negative", 17821: "neutral"},
      "function": ["classify"],
@@ -655,6 +682,7 @@ global_model_repo_catalog_list = [
                           "prepared", "proud", "sad", "sadness", "sentimental", "surprise", "surprised",
                           "terrified", "trusting"],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [],
      "marker_token_lookup": {},
      "function": ["classify"],
@@ -673,6 +701,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["rating"],
      "fc_output_values": ["1", "2", "3", "4", "5"],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [],
      "marker_token_lookup": {},
      "function": ["classify"],
@@ -693,6 +722,7 @@ global_model_repo_catalog_list = [
                          "invoice", "new account", "order", "payments", "refund", "shipping",
                          "subscription", "terminate"],
     "tokenizer": "llmware/slim-sentiment",
+    "tokenizer_local": "tokenizer_tl.json",
     "marker_tokens": [],
     "marker_token_lookup": {},
     "function": ["classify"],
@@ -711,6 +741,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["evidence"],
      "fc_output_values": ["supports", "neutral", "contradicts"],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [9996,5924,17821],
      "marker_token_lookup": {9996: "contradicts", 5924: "supports", 17821: "neutral"},
      "function": ["classify"],
@@ -729,6 +760,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["topics"],
      "fc_output_values": [],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [],
      "marker_token_lookup": {},
      "function": ["classify"],
@@ -746,6 +778,7 @@ global_model_repo_catalog_list = [
      "primary_keys": ["tags"],
      "fc_output_values": [],
      "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
      "marker_tokens": [],
      "marker_token_lookup": {},
      "function": ["classify"],
@@ -761,6 +794,7 @@ global_model_repo_catalog_list = [
      "link": "https://huggingface.co/llmware/slim-sql-tool",
      "custom_model_files": [], "custom_model_repo": "",
      "tokenizer": "llmware/slim-sql-1b-v0",
+     "tokenizer_local": "tokenizer_tl.json",
      "snapshot": True},
 
     {"model_name": "bling-answer-tool", "display_name": "bling-answer-tool",
@@ -772,6 +806,7 @@ global_model_repo_catalog_list = [
      "link": "https://huggingface.co/llmware/bling-answer-tool",
      "custom_model_files": [], "custom_model_repo": "",
      "tokenizer": "llmware/bling-tiny-llama-1b-v0",
+     "tokenizer_local": "tokenizer_tl.json",
      "snapshot": True},
 
    {"model_name": "slim-category-tool", "display_name": "slim-category-tool",
@@ -791,6 +826,7 @@ global_model_repo_catalog_list = [
                          "markets", "mergers and acquisitions", "opinion", "politics", "public markets",
                          "science", "sports", "stocks", "tech", "world"],
     "tokenizer": "llmware/slim-sentiment",
+    "tokenizer_local": "tokenizer_tl.json",
     "marker_tokens": [],
     "marker_token_lookup": {},
     "function": ["classify"],
@@ -964,6 +1000,7 @@ global_model_repo_catalog_list = [
      "temperature": 0.0, "sample_default": False, "trailing_space": "", "gguf_file": "bling-stablelm.gguf",
      "gguf_repo": "llmware/bling-stablelm-3b-gguf", "snapshot": True,
      "link": "https://huggingface.co/llmware/bling-stablelm-3b-gguf",
+     "tokenizer_local": "tokenizer_stablelm.json",
      "custom_model_files": [], "custom_model_repo": ""},
 
     {"model_name": "slim-xsum", "display_name": "llmware/slim-xsum",
@@ -984,6 +1021,7 @@ global_model_repo_catalog_list = [
      "custom_model_files": [], "custom_model_repo": "",
      "output_type": "dict", "function_call": True, "primary_keys": ["xsum"], "fc_output_values": [],
      "tokenizer": "llmware/slim-extract",
+     "tokenizer_local": "tokenizer_stablelm.json",
      "marker_tokens": [], "marker_token_lookup": {}, "function": ["classify"], "snapshot": True},
 
     {"model_name": "slim-extract", "display_name": "llmware/slim-extract",
@@ -1003,7 +1041,9 @@ global_model_repo_catalog_list = [
      "link": "https://huggingface.co/llmware/slim-extract-tool",
      "custom_model_files": [], "custom_model_repo": "", "output_type": "dict",
      "function_call": True, "primary_keys": ["key data points"], "fc_output_values": [],
-     "tokenizer": "llmware/slim-extract", "marker_tokens": [],
+     "tokenizer": "llmware/slim-extract",
+     "tokenizer_local": "tokenizer_stablelm.json",
+     "marker_tokens": [],
      "marker_token_lookup": {}, "function": ["extract"], "snapshot": True},
 
     {"model_name": "slim-boolean", "display_name": "llmware/slim-boolean",
@@ -1025,6 +1065,7 @@ global_model_repo_catalog_list = [
      "custom_model_files": [], "custom_model_repo": "", "output_type": "dict",
      "function_call": True, "primary_keys": [], "fc_output_values": [],
      "tokenizer": "llmware/slim-extract",
+     "tokenizer_local": "tokenizer_stablelm.json",
      "marker_tokens": [2369,9820], "marker_token_lookup": {2369: "no", 9820: "yes"},
      "function": ["boolean"], "snapshot": True},
 
@@ -1046,7 +1087,9 @@ global_model_repo_catalog_list = [
      "link": "https://huggingface.co/llmware/slim-sa-ner-tool",
      "custom_model_files": [], "custom_model_repo": "", "output_type": "dict",
      "function_call": True, "primary_keys": ["sentiment, person, organization, place"], "fc_output_values": [],
-     "tokenizer": "llmware/slim-extract", "marker_tokens": [],
+     "tokenizer": "llmware/slim-extract",
+     "tokenizer_local": "tokenizer_stablelm.json",
+     "marker_tokens": [],
      "marker_token_lookup": {}, "function": ["classify"], "snapshot": True},
 
     {"model_name": "slim-tags-3b", "display_name": "llmware/slim-tags-3b",
@@ -1067,7 +1110,9 @@ global_model_repo_catalog_list = [
      "link": "https://huggingface.co/llmware/slim-tags-3b-tool",
      "custom_model_files": [], "custom_model_repo": "", "output_type": "dict",
      "function_call": True, "primary_keys": ["tags"], "fc_output_values": [],
-     "tokenizer": "llmware/slim-extract", "marker_tokens": [],
+     "tokenizer": "llmware/slim-extract",
+     "tokenizer_local": "tokenizer_stablelm.json",
+     "marker_tokens": [],
      "marker_token_lookup": {}, "function": ["classify"], "snapshot": True},
 
     {"model_name": "slim-summary", "display_name": "llmware/slim-summary",
@@ -1088,7 +1133,137 @@ global_model_repo_catalog_list = [
      "custom_model_files": [], "custom_model_repo": "", "output_type": "list",
      "function_call": True, "primary_keys": ["key points (3)"], "fc_output_values": [],
      "tokenizer": "llmware/slim-extract",
-     "marker_tokens": [], "marker_token_lookup": {}, "function": ["summarize"], "snapshot": True}
+     "tokenizer_local": "tokenizer_stablelm.json",
+     "marker_tokens": [], "marker_token_lookup": {}, "function": ["summarize"], "snapshot": True},
+
+    # adding new slim q-gen models
+    {"model_name": "slim-q-gen-phi-3-tool", "display_name": "slim-q-gen-tool",
+     "model_family": "GGUFGenerativeModel", "model_category": "generative_local", "model_location": "llmware_repo",
+     "context_window": 4096, "instruction_following": False, "prompt_wrapper": "human_bot",
+     "temperature": 0.3, "sample_default": True, "trailing_space": "",
+     "gguf_file": "q_gen.gguf",
+     "gguf_repo": "llmware/slim-q-gen-phi-3-tool",
+     "link": "https://huggingface.co/llmware/slim-q-gen-phi-3-tool",
+     "custom_model_files": [], "custom_model_repo": "",
+     "output_type": "dict",
+     "function_call": True,
+     "primary_keys": ["question"],
+     "fc_output_values": [],
+     "tokenizer": "microsoft/Phi-3-mini-4k-instruct",
+     "tokenizer_local": "tokenizer_phi3.json",
+     "marker_tokens": [], "marker_token_lookup": {},
+     "function": ["generate"],
+     "snapshot": True},
+
+    {"model_name": "slim-q-gen-tiny-tool", "display_name": "llmware/slim-q-gen-tiny-tool",
+     "model_family": "GGUFGenerativeModel", "model_category": "generative_local", "model_location": "llmware_repo",
+     "context_window": 4096, "instruction_following": False, "prompt_wrapper": "human_bot",
+     "temperature": 0.5, "sample_default": True, "trailing_space": "",
+     "gguf_file": "q_gen.gguf",
+     "gguf_repo": "llmware/slim-q-gen-tiny-tool",
+     "link": "https://huggingface.co/slim-q-gen-tiny-tool",
+     "custom_model_files": [], "custom_model_repo": "",
+     "output_type": "dict",
+     "function_call": True,
+     "primary_keys": ["question"],
+     "fc_output_values": [],
+     "tokenizer": "llmware/slim-sentiment",
+     "tokenizer_local": "tokenizer_tl.json",
+     "marker_tokens": [], "marker_token_lookup": {},
+     "function": ["generate"],
+     "snapshot": True},
+
+    {"model_name": "llmware/slim-q-gen-tiny", "display_name": "slim-q-gen-tiny",
+     "model_family": "HFGenerativeModel", "model_category": "generative_local", "model_location": "hf_repo",
+     "context_window": 2048, "instruction_following": False, "prompt_wrapper": "human_bot",
+     "temperature": 0.5, "sample_default": True, "trailing_space": "", "gguf_file": "", "gguf_repo": "",
+     "link": "https://huggingface.co/llmware/slim-q-gen-tiny",
+     "hf_repo": "llmware/slim-q-gen-tiny",
+     "custom_model_files": [""], "custom_model_repo": "",
+     "output_type": "dict", "function_call": True,
+     "primary_keys": ["question"],
+     "fc_output_values": ["question"],
+     "marker_tokens": [],
+     "marker_token_lookup": {},
+     "function": ["generate"]},
+
+    {"model_name": "llmware/slim-q-gen-phi-3", "display_name": "slim-q-gen-phi-3",
+     "model_family": "HFGenerativeModel", "model_category": "generative_local", "model_location": "hf_repo",
+     "context_window": 2048, "instruction_following": False, "prompt_wrapper": "human_bot",
+     "temperature": 0.5, "sample_default": True, "trailing_space": "", "gguf_file": "", "gguf_repo": "",
+     "link": "https://huggingface.co/llmware/slim-q-gen-phi-3",
+     "hf_repo": "llmware/slim-q-gen-phi-3",
+     "custom_model_files": [""], "custom_model_repo": "",
+     "output_type": "dict", "function_call": True,
+     "primary_keys": ["question"],
+     "fc_output_values": ["question"],
+     "marker_tokens": [],
+     "marker_token_lookup": {},
+     "function": ["generate"]},
+
+     {"model_name": "slim-qa-gen-tiny-tool", "display_name": "llmware/slim-qa-gen-tiny-tool",
+      "model_family": "GGUFGenerativeModel", "model_category": "generative_local", "model_location": "llmware_repo",
+      "context_window": 4096, "instruction_following": False, "prompt_wrapper": "human_bot",
+      "temperature": 0.5, "sample_default": True, "trailing_space": "",
+      "gguf_file": "qa_gen_v3.gguf",
+      "gguf_repo": "llmware/slim-qa-gen-tiny-tool",
+      "link": "https://huggingface.co/slim-qa-gen-tiny-tool",
+      "custom_model_files": [], "custom_model_repo": "",
+      "output_type": "dict",
+      "function_call": True,
+      "primary_keys": ["question, answer"],    # also accepts boolean and multiple choice
+      "fc_output_values": [],
+      "tokenizer": "llmware/slim-sentiment",
+      "tokenizer_local": "tokenizer_tl.json",
+      "marker_tokens": [], "marker_token_lookup": {},
+      "function": ["generate"],
+      "snapshot": True},
+
+    {"model_name": "slim-qa-gen-phi-3-tool", "display_name": "slim-qa-gen-phi-3-tool",
+     "model_family": "GGUFGenerativeModel", "model_category": "generative_local", "model_location": "llmware_repo",
+     "context_window": 4096, "instruction_following": False, "prompt_wrapper": "human_bot",
+     "temperature": 0.3, "sample_default": True, "trailing_space": "",
+     "gguf_file": "qa_gen_v3.gguf",
+     "gguf_repo": "llmware/slim-qa-gen-phi-3-tool",
+     "link": "https://huggingface.co/llmware/slim-qa-gen-phi-3-tool",
+     "custom_model_files": [], "custom_model_repo": "",
+     "output_type": "dict",
+     "function_call": True,
+     "primary_keys": ["question, answer"],    # also accepts boolean and multiple choice
+     "fc_output_values": [],
+     "tokenizer": "microsoft/Phi-3-mini-4k-instruct",
+     "tokenizer_local": "tokenizer_phi3.json",
+     "marker_tokens": [], "marker_token_lookup": {},
+     "function": ["generate"],
+     "snapshot": True},
+
+     {"model_name": "llmware/slim-qa-gen-tiny", "display_name": "slim-qa-gen-tiny",
+      "model_family": "HFGenerativeModel", "model_category": "generative_local", "model_location": "hf_repo",
+      "context_window": 2048, "instruction_following": False, "prompt_wrapper": "human_bot",
+      "temperature": 0.5, "sample_default": True, "trailing_space": "", "gguf_file": "", "gguf_repo": "",
+      "link": "https://huggingface.co/llmware/slim-qa-gen-tiny",
+      "hf_repo": "llmware/slim-qa-gen-tiny",
+      "custom_model_files": [""], "custom_model_repo": "",
+      "output_type": "dict", "function_call": True,
+      "primary_keys": ["question, answer"],
+      "fc_output_values": ["question, answer"],
+      "marker_tokens": [],
+      "marker_token_lookup": {},
+      "function": ["generate"]},
+
+     {"model_name": "llmware/slim-qa-gen-phi-3", "display_name": "slim-qa-gen-phi-3",
+      "model_family": "HFGenerativeModel", "model_category": "generative_local", "model_location": "hf_repo",
+      "context_window": 2048, "instruction_following": False, "prompt_wrapper": "human_bot",
+      "temperature": 0.5, "sample_default": True, "trailing_space": "", "gguf_file": "", "gguf_repo": "",
+      "link": "https://huggingface.co/llmware/slim-qa-gen-phi-3",
+      "hf_repo": "llmware/slim-qa-gen-phi-3",
+      "custom_model_files": [""], "custom_model_repo": "",
+      "output_type": "dict", "function_call": True,
+      "primary_keys": ["question, answer"],
+      "fc_output_values": ["question, answer"],
+      "marker_tokens": [],
+      "marker_token_lookup": {},
+      "function": ["generate"]}
 
 ]
 
