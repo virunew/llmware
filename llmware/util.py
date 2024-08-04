@@ -67,14 +67,23 @@ class Utilities:
         if system == 'linux' and machine not in ['aarch64', 'x86_64']:
             machine = 'x86_64'
 
-        # deprecation warning for aarch64 linux
+        #   deprecation warning for aarch64 linux
         if system == 'linux' and machine == 'aarch64':
             logger.warning("Deprecation warning: as of llmware 0.2.7, we are deprecating support for aarch64 "
-                           "linux - we build, support and test on six other major platforms - Linux x86_64, "
-                           "Linux x86_64 with CUDA, Windows x86_64, Windows x86_64 with CUDA, Mac Metal, and "
-                           "Mac x86_64.  We will revisit platform support from time-to-time, due "
-                           "to availability and interest.  If you have an important need for "
-                           "support for aarch 64 linux, please raise an issue at github/llmware-ai/llmware.git")
+                           "linux - we build, support and test on Linux x86_64, Linux x86_64 with CUDA, "
+                           "Windows x86_64, Windows x86_64 with CUDA, and Mac Metal.  We will revisit "
+                           "platform support from time-to-time, due to availability and interest.  "
+                           "If you have an important need for support for aarch 64 linux, please "
+                           "raise an issue at github/llmware-ai/llmware.git")
+
+        #   deprecation warning for darwin x86_64
+        if system == "darwin" and machine == "x86_64":
+            logger.warning("Deprecation warning: as of llmware 0.2.11, we are deprecating support for Mac x86_64 - "
+                           "we build, support, and test on Linux x86_64, Linux x86_64 with CUDA, Windows "
+                           "x86_64, Windows x86_64 with CUDA, and Mac Metal (M1-M2-M3).  We will revisit "
+                           "platform support from time-to-time, due to availability and interest.  "
+                           "If you have an important need to support this older version of Mac, please raise an "
+                           "issue at github/llmware-ai/llmware.git")
 
         # Construct the path to a specific lib folder.  Eg. .../llmware/lib/darwin/x86_64
         machine_dependent_lib_path = os.path.join(LLMWareConfig.get_config("shared_lib_path"), system, machine)
@@ -118,11 +127,20 @@ class Utilities:
         # deprecation warning for aarch64 linux
         if system == 'linux' and machine == 'aarch64':
             logger.warning("Deprecation warning: as of llmware 0.2.7, we are deprecating support for aarch64 "
-                           "linux - we build, support and test on six other major platforms - Linux x86_64, "
-                           "Linux x86_64 with CUDA, Windows x86_64, Windows x86_64 with CUDA, Mac Metal, and "
-                           "Mac x86_64.  We will revisit from time-to-time, due "
+                           "linux - we build, support and test the following strategic platforms - Linux x86_64, "
+                           "Linux x86_64 with CUDA, Windows x86_64, Windows x86_64 with CUDA, and Mac Metal.  "
+                           "We will revisit from time-to-time, due "
                            "to availability and interest.  If you have an important need for "
                            "support for aarch 64 linux, please raise an issue at github/llmware-ai/llmware.git")
+
+        #   deprecation warning for darwin x86_64
+        if system == "darwin" and machine == "x86_64":
+            logger.warning("Deprecation warning: as of llmware 0.2.11, we are deprecating support for Mac x86_64 - "
+                           "we build, support, and test on Linux x86_64, Linux x86_64 with CUDA, Windows "
+                           "x86_64, Windows x86_64 with CUDA, and Mac Metal (M1-M2-M3).  We will revisit "
+                           "platform support from time-to-time, due to availability and interest.  "
+                           "If you have an important need to support this older version of Mac, please raise an "
+                           "issue at github/llmware-ai/llmware.git")
 
         # Construct the path to a specific lib folder.  Eg. .../llmware/lib/darwin/x86_64
         machine_dependent_lib_path = os.path.join(LLMWareConfig.get_config("shared_lib_path"), system, machine)
@@ -170,11 +188,20 @@ class Utilities:
         # deprecation warning for aarch64 linux
         if system == 'linux' and machine == 'aarch64':
             logger.warning("Deprecation warning: as of llmware 0.2.7, we are deprecating support for aarch64 "
-                           "linux - we build, support and test on six other major platforms - Linux x86_64, "
-                           "Linux x86_64 with CUDA, Windows x86_64, Windows x86_64 with CUDA, Mac Metal, and "
-                           "Mac x86_64.  We will revisit from time-to-time, due "
+                           "linux - we build, support and test on the following strategic platforms - Linux x86_64, "
+                           "Linux x86_64 with CUDA, Windows x86_64, Windows x86_64 with CUDA, and Mac Metal.  "
+                           "We will revisit from time-to-time, due "
                            "to availability and interest.  If you have an important need for "
                            "support for aarch 64 linux, please raise an issue at github/llmware-ai/llmware.git")
+
+        #   deprecation warning for darwin x86_64
+        if system == "darwin" and machine == "x86_64":
+            logger.warning("Deprecation warning: as of llmware 0.2.11, we are deprecating support for Mac x86_64 - "
+                           "we build, support, and test on Linux x86_64, Linux x86_64 with CUDA, Windows "
+                           "x86_64, Windows x86_64 with CUDA, and Mac Metal (M1-M2-M3).  We will revisit "
+                           "platform support from time-to-time, due to availability and interest.  "
+                           "If you have an important need to support this older version of Mac, please raise an "
+                           "issue at github/llmware-ai/llmware.git")
 
         # Construct the path to a specific lib folder.  Eg. .../llmware/lib/darwin/x86_64
         machine_dependent_lib_path = os.path.join(LLMWareConfig.get_config("shared_lib_path"), system, machine)
@@ -220,8 +247,9 @@ class Utilities:
 
             #   if not found locally, then pull from global repo
 
-            logger.info("update: gpt2 tokenizer used as default - not in local model repository, so pulling "
-                        "from global repo - this may take a few seconds the first time to download.")
+            logger.info("Utilities - get_default_tokenizer - if no tokenizer found, then as a backup, "
+                        "the gpt2 tokenizer will be used - not in local model repository, "
+                        "so pulling from global repo - this may take a few seconds the first time to download.")
 
             files = CloudBucketManager().pull_single_model_from_llmware_public_repo(model_name="gpt2")
 
@@ -950,6 +978,188 @@ class Utilities:
                 logger.warning(f"warning: could not convert value into integer as expected - {key} - {value}")
 
             output_dict.update({key: value})
+
+        return output_dict
+
+    @staticmethod
+    def file_checksum(fp, fn, hash_type="sha256"):
+
+        """ Creates File Checksum against a selected file with options to configure the hash_type, which must be
+        a hash supported by hashlib.  If valid type not found, then automatic triage to 'sha256'.  """
+
+        hash_output = None
+
+        try:
+            import hashlib
+
+            if hasattr(hashlib, hash_type):
+                hash_builder = getattr(hashlib, hash_type)()
+            else:
+                logging.warning(f"Utilities - file_checksum - selected hash type - {hash_type} - not supported -"
+                                f"defaulting to sha256")
+                hash_builder = hashlib.sha256()
+
+            # handle content in binary form
+            f = open(os.path.join(fp, fn), "rb")
+
+            while chunk := f.read(4096):
+                hash_builder.update(chunk)
+
+            hash_output = hash_builder.hexdigest()
+
+        except:
+            logger.warning(f"Utilities - file_checksum - could not create file hash hex for: \n"
+                           f"-- file: {fn}\n"
+                           f"-- folder: {fp}\n"
+                           f"-- hash type: {hash_type}")
+
+        return hash_output
+
+    @staticmethod
+    def create_hash_stamp (fp, save=True, hash_fn="hash_record", hash_type="sha256", **kwargs):
+
+        """ Creates Hash Stamp for all files in a folder.
+
+        -- "hash_type" is 'sha256' by default, but can be configured to any hash type supported by hashlib
+
+        -- If save is set to True (default), then writes as a JSON file into the folder using a filename that is a
+        concatenation of hash_fn and hash_type
+
+        -- Will attempt to not over-write an existing hash record.  If a matching filename is found,
+        then a fast triage will be applied to append a long random number to the file name -
+        note: it is unlikely but possible for a name space collision.  Will enhance config and safety
+        options in future releases.
+
+        """
+
+        import random
+        hash_record = {}
+
+        #   save as .json file and add hash_type by default at the end of the name
+        hash_full_name = hash_fn + "_" + hash_type + ".json"
+
+        fp_files = os.listdir(fp)
+
+        for file in fp_files:
+            if file == hash_full_name:
+
+                if save:
+                    r = random.randint(0,10000000)
+                    rec_core = str(hash_full_name).split(".")[0]
+                    hash_full_name = rec_core + "_" + str(r) + ".json"
+                    logging.warning(f"Utilities - create_hash_stamp - found existing hash_record with same name - "
+                                    f"attempting to create new hash record file with name - {hash_full_name}.")
+
+            hash_value = Utilities().file_checksum(fp, file, hash_type=hash_type)
+            hash_record.update({file: hash_value})
+
+        time_stamp = Utilities().get_current_time_now()
+
+        hash_record.update({"time_stamp": time_stamp})
+
+        #   option to add **kwargs to the stamp, e.g., user and related info
+        full_record = {**hash_record, **kwargs}
+
+        if save:
+
+            logger.debug(f"Utilities - create_hash_stamp - config output: {full_record}")
+
+            import json
+            f = open(os.path.join(fp, hash_full_name), "w")
+            j = json.dumps(full_record, indent=1)
+            f.write(j)
+            f.close()
+
+        return full_record
+
+    @staticmethod
+    def compare_hash (fp, hash_fn="hash_record", hash_type="sha256", selected_files=None, ignore_pattern="hash"):
+
+        """ Compares two hashes from a folder path (fp)  -
+
+            1.  An existing hash saved in the hash_fn file passed to the method.
+            2.  A new hash dynamically created against each file in the folder path.
+
+        By default, the method will ignore files that start with "hash" but this can be disabled by setting
+        ignore_pattern to None or ""
+
+        If only interested in hashes against a subset of the files, then an optional list of selected files
+        can be passed in the selected_files parameter - and only files matching those names will be
+        compared for hash consistency.
+
+        """
+
+        import json
+        import os
+
+        hash_full_name = hash_fn + "_" + hash_type + ".json"
+
+        try:
+            hash_file = json.load(open(os.path.join(fp, hash_full_name), "r"))
+        except:
+            logger.warning(f"Utilities - compare_hash_record - could not find an existing hash file at: "
+                           f"{os.path.join(fp, hash_full_name)}.  Will create new hash record, but will not "
+                           f"be able to provide a meaningful comparison.")
+            hash_file = {}
+
+        new_hash_record = Utilities().create_hash_stamp(fp, hash_fn=hash_fn, hash_type=hash_type, save=False)
+
+        #   apply any pruning of certain files
+
+        if selected_files:
+
+            #   only compare files in the selected_files list
+            keys = list(new_hash_record.keys())
+
+            for key in keys:
+                if key not in selected_files:
+                    del(new_hash_record[key])
+
+        else:
+
+            #   generally review all files with a few exclusions by default
+            keys = list(new_hash_record.keys())
+
+            #   don't compare the hash of the time_stamp entry, which will be different
+            if "time_stamp" in new_hash_record:
+                del(new_hash_record["time_stamp"])
+
+            #   ignore files starting with 'hash' by default
+            if ignore_pattern:
+
+                for k in keys:
+                    if k.startswith(ignore_pattern):
+                        logger.debug(f"Utilities - compare_hash - ignoring - {k}")
+                        del(new_hash_record[k])
+
+        hashed_item_count = len(new_hash_record.items())
+
+        matched_count = 0
+        confirmed = {}
+        extra_keys = []
+        values_changed = []
+        confirmed_files = []
+
+        for key, value in new_hash_record.items():
+            matched = False
+            if key in hash_file:
+                if value == hash_file[key]:
+                    matched = True
+                    matched_count += 1
+                    confirmed.update({key:value})
+                    confirmed_files.append(key)
+                else:
+                    logger.warning(f"Utilities - compare_hash - value not matching for key - {key}")
+                    values_changed.append(key)
+            else:
+                logger.warning(f"Utilities - compare_hash - extra key - {key} - in hash_file not found in original hash")
+                extra_keys.append(key)
+
+        output_dict = {"hashed_file_count": hashed_item_count,
+                       "validated_file_count": matched_count,
+                       "extra_keys": extra_keys,
+                       "changed_files": values_changed,
+                       "validated_files": confirmed_files}
 
         return output_dict
 

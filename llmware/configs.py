@@ -97,12 +97,19 @@ class LLMWareConfig:
              "shared_lib_path": os.path.join(os.path.dirname(os.path.realpath(__file__)), "lib"),
              "logging_level": logging.WARNING,
              "logging_format": COLOR_WHITE + '%(levelname)-4s: %(message)s' + COLOR_RESET,
-             "logging_level_by_module": {"llmware.embeddings": 20, "llmware.models": 30, "llmware.agents":20,
-                                         "llmware.prompts": 20},
+             "logging_level_by_module": {"llmware.embeddings": 20, "llmware.models": 20, "llmware.agents":20,
+                                         "llmware.prompts": 20, "llmware.resources": 20,
+                                         "llmware.setup": 20, "llmware.parsers": 20},
              "agent_writer_mode": "screen",
              "agent_log_file": "agent_log.txt",
-             "model_register": {"module": "llmware.models", "class": "register"},
-             "model_post_init": {"module": "llmware.models", "class": "post_init"}
+             "model_register": {"module": "llmware.models", "method": "register"},
+             "model_post_init": {"module": "llmware.models", "method": "post_init"},
+             "model_validate": {"module": "llmware.models", "method": "validate"},
+             "model_preview": {"module": "llmware.models", "method": "preview"},
+             "model_fetch": {"module": "llmware.models", "method": "pull_snapshot_from_hf"},
+             "model_router": {"module": "llmware.models", "method": "route_optimizer"},
+             "apply_model_load_router": False,
+             "apply_default_fetch_override": False
              }
 
     @classmethod
