@@ -3357,7 +3357,8 @@ class OpenAIGenModel(BaseModel):
 
         # new - change with openai v1 api
         try:
-            from openai import OpenAI
+            #from openai import OpenAI
+            from langfuse.openai import OpenAI, AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI
         except ImportError:
             raise DependencyNotInstalledException("openai >= 1.0")
 
@@ -3368,8 +3369,8 @@ class OpenAIGenModel(BaseModel):
 
         try:
 
-            if self.model_name in ["gpt-3.5-turbo","gpt-4","gpt-4-1106-preview","gpt-3.5-turbo-1106", 
-                                   "gpt-4-0125-preview", "gpt-3.5-turbo-0125", "gpt-4o", "gpt-4o-2024-05-13"]:
+            if self.model_name in ["gpt-3.5-turbo","gpt-4","gpt-4-1106-preview","gpt-3.5-turbo-1106",
+                                   "gpt-4-0125-preview", "gpt-3.5-turbo-0125", "gpt-4o", "gpt-4o-2024-05-13","gpt-4o-mini"]:
 
                 messages = self.prompt_engineer_chatgpt3(prompt_enriched, self.add_context, inference_dict)
 
@@ -3827,7 +3828,7 @@ class GoogleGenModel(BaseModel):
                                           temperature=0.7)
 
             logger.debug(f"google model response: {response.text}")
-         
+
             text_out = response.text
 
             input_count = len(prompt_enriched)
@@ -3849,7 +3850,7 @@ class GoogleGenModel(BaseModel):
         finally:
             # Close the credentials json which automatically deletes it (since it is a NamedTemporaryFile)
             os.remove(google_json_credentials)
-        
+
         output_response = {"llm_response": text_out, "usage": usage}
 
         logger.debug("update: output_response - google: %s ", output_response)
@@ -3864,7 +3865,7 @@ class GoogleGenModel(BaseModel):
         self.register()
 
         return output_response
-    
+
     def api_key_to_json(self):
 
         # Google authentication key is an entire json dictionary which we have the user pass in as an env var

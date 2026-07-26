@@ -1187,7 +1187,7 @@ class PGRetrieval:
 
         sql_query = f"SELECT ts_rank_cd (ts, to_tsquery('english', '{search_string}')) as rank, * " \
                     f"FROM {self.library_name} " \
-                    f"WHERE ts @@ to_tsquery('english', {search_string})"
+                    f"WHERE ts @@ to_tsquery('english', '{search_string}')"
 
         if key_value_dict:
             for key, value in key_value_dict.items():
@@ -3182,7 +3182,7 @@ class DBCursor:
             else:
                 output.append(new_entry)
 
-        """   
+        """
         for entries in self.cursor:
 
             if self.return_dict and not isinstance(entries,dict):
@@ -4208,7 +4208,7 @@ class CloudBucketManager:
             LLMWareConfig().setup_llmware_workspace()
 
         model_path_local = LLMWareConfig.get_model_repo_path()
-        
+
         if not os.path.exists(model_path_local):
             os.makedirs(model_path_local)
 
@@ -5072,7 +5072,7 @@ class StateResourceUtil:
         #   if time stamp used in filename, needs to be Windows compliant
         if platform.system() == "Windows":
             time_str = "%Y-%m-%d_%H%M%S"
-    
+
         return datetime.now().strftime(time_str)
 
     @staticmethod

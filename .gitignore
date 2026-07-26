@@ -1,6 +1,6 @@
 # Backup fiels
 ~*
-
+env*
 # Python build / packaging
 build/
 dist/
