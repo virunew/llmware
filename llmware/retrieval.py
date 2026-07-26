@@ -25,7 +25,7 @@ import logging
 import os
 from collections import Counter
 from datetime import datetime
-from bson.objectid import ObjectId
+from bson import ObjectId
 
 from llmware.configs import LLMWareConfig
 from llmware.embeddings import EmbeddingHandler
@@ -876,7 +876,7 @@ class Query:
         for key in keys_to_check:
             if key not in self.query_result_return_keys:
                 self.query_result_return_keys.append(key)
-        
+
         # run dual pass - text + semantic
         # Choose appropriate text query method based on custom_filter
         if custom_filter:
@@ -1363,15 +1363,15 @@ class Query:
         if len(output) == 0:
             logger.info(f"update: Query - Library - block_lookup - block not found: {block_id}")
             result = None
-            
+
             return result
-            
+
         if len(output) > 1:
             result = output[0]
 
         if len(output) == 1:
             result = output[0]
-        
+
         # if arrived this point, then positive result has been identified
         result.update({"matches": []})
         result.update({"page_num": result["master_index"]})
@@ -1496,11 +1496,11 @@ class Query:
         """ Utility function to locate the character-level match of a query inside a core_text. """
 
         matches_found = []
-        
+
         # edge case - but return empty match if query is null
         if not query:
             return matches_found
-            
+
         b = CorpTokenizer(one_letter_removal=False, remove_stop_words=False, remove_punctuation=False,
                           remove_numbers=False)
 
@@ -1511,7 +1511,7 @@ class Query:
             for key_term in query_tokens:
                 if len(key_term) == 0:
                     continue
-                
+
                 if key_term.startswith('"'):
                     key_term = key_term[1:-1]
 
@@ -1730,7 +1730,7 @@ class Query:
 
         output = QueryState(self).generate_query_report_current_state()
         return output
-    
+
     def filter_by_key_value_range(self, key, value_range, results_only=True):
 
         """ Executes a filter by key value range. """

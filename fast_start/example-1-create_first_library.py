@@ -102,8 +102,8 @@ if __name__ == "__main__":
     #   optional - set the active DB to be used - by default, it is "mongo"
     #   if you are just getting started, and have not installed a separate db, select "sqlite"
 
-    LLMWareConfig().set_active_db("sqlite")
-
+    LLMWareConfig().set_active_db("mongo")
+    LLMWareConfig().set_vector_db("milvus")
     #   if you want to see a different log view, e.g., see a list of each parsed files 'in progress',
     #   you can set a different debug mode view anytime
 

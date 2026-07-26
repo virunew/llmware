@@ -80,11 +80,25 @@ class Status:
 
         """ Gets the embedding status written by the EmbeddingHandler class and each supported vector DB """
 
-        status_key = self._get_embedding_status_key(library_name, embedding_model)
-        status = CollectionRetrieval("status", account_name=self.account_name).lookup("key", status_key)
+        try:
+            status_key = self._get_embedding_status_key(library_name, embedding_model)
+            status = CollectionRetrieval("status", account_name=self.account_name).lookup("key", status_key)
 
-        return status
-    
+            # Ensure consistent return format - always return a list
+            if status is None:
+                return []
+            elif isinstance(status, dict):
+                return [status]
+            elif isinstance(status, list):
+                return status
+            else:
+                # Unexpected type, return empty list
+                return []
+
+        except Exception as e:
+            print(f"Error retrieving embedding status: {str(e)}")
+            return []
+
     def new_embedding_status(self, library_name, embedding_model, total):
 
         """ Creates a new embedding status - invoked at start of embedding job """
@@ -97,7 +111,7 @@ class Status:
             "end_time": None,
             "total": total,
             "current": 0,
-            "units": "blocks" 
+            "units": "blocks"
         }
         CollectionWriter("status", account_name=self.account_name).replace_record({"key":status_key},status_entry)
 
@@ -107,22 +121,48 @@ class Status:
 
         """ Increments the embedding status throughout the embedding job - enables parallelized writing and updates """
 
-        status_key = self._get_embedding_status_key(library_name, embedding_model)
+        try:
+            status_key = self._get_embedding_status_key(library_name, embedding_model)
 
-        status_entry = CollectionRetrieval("status", account_name=self.account_name).lookup("key", status_key)
+            status_entry = CollectionRetrieval("status", account_name=self.account_name).lookup("key", status_key)
 
-        if len(status_entry) == 1:
-            status_entry = status_entry[0]
+            # Handle different return types safely
+            if not status_entry:
+                print(f"Warning: No status entry found for {library_name} with model {embedding_model}")
+                return -1
 
-        status_entry["current"] = status_entry["current"] + progress
-        if status_entry["current"] >= status_entry["total"]:
-            status_entry["end_time"] = time.time()
+            # Ensure we have a single status entry to work with
+            if isinstance(status_entry, list):
+                if len(status_entry) == 1:
+                    status_entry = status_entry[0]
+                elif len(status_entry) > 1:
+                    print(f"Warning: Multiple status entries found for {library_name} with model {embedding_model}, using first one")
+                    status_entry = status_entry[0]
+                else:
+                    print(f"Warning: Empty status list for {library_name} with model {embedding_model}")
+                    return -1
+            elif not isinstance(status_entry, dict):
+                print(f"Warning: Unexpected status entry format for {library_name} with model {embedding_model}")
+                return -1
 
-        status_entry["summary"] = f"{status_entry['current']} of {status_entry['total']} {status_entry['units']}"
+            # Validate required fields
+            if "current" not in status_entry or "total" not in status_entry or "units" not in status_entry:
+                print(f"Warning: Status entry missing required fields for {library_name} with model {embedding_model}")
+                return -1
 
-        CollectionWriter("status", account_name=self.account_name).replace_record({"key":status_key}, status_entry)
+            status_entry["current"] = status_entry["current"] + progress
+            if status_entry["current"] >= status_entry["total"]:
+                status_entry["end_time"] = time.time()
 
-        return 0
+            status_entry["summary"] = f"{status_entry['current']} of {status_entry['total']} {status_entry['units']}"
+
+            CollectionWriter("status", account_name=self.account_name).replace_record({"key":status_key}, status_entry)
+
+            return 0
+
+        except Exception as e:
+            print(f"Error incrementing embedding status: {str(e)}")
+            return -1
 
     def tail_embedding_status(self, library_name, model_name, poll_seconds=0.2):
 
@@ -138,13 +178,42 @@ class Status:
 
         current_summary = ""
         while True:
-            status_dict = self.get_embedding_status(library_name, model_name)
-            if status_dict:
-                if current_summary != status_dict["summary"]:  # If the status has changed, print it
-                    current_summary = status_dict["summary"]
+            try:
+                status_dict = self.get_embedding_status(library_name, model_name)
+
+                # Handle different return types safely
+                if not status_dict:
+                    # No status found, wait and continue
+                    time.sleep(poll_seconds)
+                    continue
+
+                # Ensure status_dict is a list and has at least one element
+                if isinstance(status_dict, list) and len(status_dict) > 0:
+                    status_entry = status_dict[0]
+                elif isinstance(status_dict, dict):
+                    # If it's returned as a single dict, use it directly
+                    status_entry = status_dict
+                else:
+                    # Unexpected format, wait and continue
+                    time.sleep(poll_seconds)
+                    continue
+
+                # Check if the status has changed
+                if "summary" in status_entry and current_summary != status_entry["summary"]:
+                    current_summary = status_entry["summary"]
                     print(current_summary)
-                    if status_dict["current"] >= status_dict["total"]:  # If the job is done exit
-                        return     
+
+                    # Check if the job is done
+                    if "current" in status_entry and "total" in status_entry:
+                        if status_entry["current"] >= status_entry["total"]:
+                            return
+
+            except Exception as e:
+                # Log error and continue polling
+                print(f"Error in embedding status monitoring: {str(e)}")
+                time.sleep(poll_seconds)
+                continue
+
             time.sleep(poll_seconds)
 
     # Generate and return a unique key for status, combining the library_name and embedding_model
