@@ -3189,6 +3189,18 @@ class OllamaModel(BaseModel):
         return output_response
 
 
+def _load_openai_client():
+
+    """Load the instrumented OpenAI client when available, otherwise use the SDK directly."""
+
+    try:
+        from langfuse.openai import OpenAI
+    except ImportError:
+        from openai import OpenAI
+
+    return OpenAI
+
+
 class OpenAIGenModel(BaseModel):
 
     """ OpenAIGenModel class implements the OpenAI API for its generative decoder models. """
@@ -3357,8 +3369,7 @@ class OpenAIGenModel(BaseModel):
 
         # new - change with openai v1 api
         try:
-            #from openai import OpenAI
-            from langfuse.openai import OpenAI, AsyncOpenAI, AzureOpenAI, AsyncAzureOpenAI
+            OpenAI = _load_openai_client()
         except ImportError:
             raise DependencyNotInstalledException("openai >= 1.0")
 
